@@ -1,0 +1,12 @@
+{
+  "Id": "AIEngineer",
+  "DisplayName": "AI Engineer",
+  "Author": "Specter242",
+  "Version": "0.15.1",
+  "ManagerVersion": "0.28.2",
+  "AssemblyName": "AIEngineer.dll",
+  "EntryMethod": "AIEngineer.Main.Load",
+  "MultiplayerCompatibility": "All",
+  "Repository": "https://raw.githubusercontent.com/Specter242/DVAIEngineer/main/repository.json",
+  "LoadAfter": ["DVCustomCarLoader", "Multiplayer", "Mapify", "SkinManagerMod"]
+}

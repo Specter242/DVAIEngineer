@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <!-- Override with -p:DvInstallDir=... when the game lives elsewhere. -->
+    <DvInstallDir Condition="'$(DvInstallDir)' == ''">$(HOME)/.local/share/Steam/steamapps/common/Derail Valley</DvInstallDir>
+    <DvManagedDir>$(DvInstallDir)/DerailValley_Data/Managed</DvManagedDir>
+    <DvModManagerDir>$(DvManagedDir)/UnityModManager</DvModManagerDir>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <!-- Published assemblies must not carry local paths. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)'))=/AIEngineer/</PathMap>
+  </PropertyGroup>
+</Project>
