@@ -1,3 +1,9 @@
 {
-  "Releases": []
+  "Releases": [
+    {
+      "Id": "AIEngineer",
+      "Version": "0.15.1",
+      "DownloadUrl": "https://github.com/Specter242/DVAIEngineer/releases/download/v0.15.1/AIEngineer-0.15.1.zip"
+    }
+  ]
 }
