@@ -6,6 +6,7 @@
   "ManagerVersion": "0.28.2",
   "AssemblyName": "AIEngineer.dll",
   "EntryMethod": "AIEngineer.Main.Load",
+  "HomePage": "https://www.nexusmods.com/derailvalley/mods/1846",
   "MultiplayerCompatibility": "All",
   "Repository": "https://raw.githubusercontent.com/Specter242/DVAIEngineer/main/repository.json",
   "LoadAfter": ["DVCustomCarLoader", "Multiplayer", "Mapify", "SkinManagerMod"]
