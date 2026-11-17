@@ -78,6 +78,11 @@ namespace AIEngineer.UI.Tablet
                 foreach (var car in lead.trainset.cars)
                     if (car != null && car != lead && car.IsLoco && !engineers.Contains(car))
                         engineers.Add(car);
+            // A loco picked by hand ("Give orders to it" on the map) stays picked while it exists, and has
+            // its plate, though it isn't the player's own and has no engineer yet: its first order gives it
+            // one. (0.15.1 dropped it within a second, and the order went to another engineer.)
+            if (Chosen != null && Chosen.IsLoco && !engineers.Contains(Chosen))
+                engineers.Add(Chosen);
             engineers.Sort((a, b) => string.CompareOrdinal(a.ID, b.ID));
             if (!chosenOnce)
             {
@@ -87,7 +92,7 @@ namespace AIEngineer.UI.Tablet
                 if (mine != null && (mine.uniqueCar || Host.SessionFor(mine, false) != null))
                     Chosen = mine;
             }
-            if (Chosen == null || (!engineers.Contains(Chosen) && Host.SessionFor(Chosen, false) == null))
+            if (Chosen == null)
                 Chosen = engineers.Count > 0 ? engineers[0] : null;
         }
 
@@ -115,9 +120,11 @@ namespace AIEngineer.UI.Tablet
             var fit = width >= 150 ? n : Mathf.Max(1, (int)((room + 8) / (150 + 8)));
             if (fit < n)
                 width = (room - 8 * (fit - 1)) / fit;
+            // More than fit: the first ones, and the chosen loco's plate always in the last place.
+            var chosenAt = Chosen != null ? engineers.IndexOf(Chosen) : -1;
             for (var i = 0; i < fit; i++)
             {
-                var loco = engineers[i];
+                var loco = i == fit - 1 && chosenAt >= fit ? Chosen : engineers[i];
                 var r = new Rect(x + i * (width + 8), 12, width, 64);
                 var on = loco == Chosen;
                 if (Button(r, $"<b>{loco.ID}</b>\n<size=23>{Tint(Short(loco), Soft)}</size>", on ? ChipOn : Chip))

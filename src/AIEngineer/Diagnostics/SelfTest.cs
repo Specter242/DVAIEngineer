@@ -994,6 +994,7 @@ namespace AIEngineer.Diagnostics
             var world = Host.World;
             var from = Dispatch.MapPosition(s.Loco);
             List<TrainCar> spawned = null;
+            TrainCar unowned = null;
             foreach (var yard in Dispatch.Yards(world.Network, from))
             {
                 var spot = yard.Tracks.Find(t => t.Length > 80 && !world.Occupancy.IsOccupied(t.Track, int.MinValue));
@@ -1002,10 +1003,19 @@ namespace AIEngineer.Diagnostics
                 var flat = TrainCarType.FlatbedEmpty.ToV2();
                 spawned = CarSpawner.Instance.SpawnCarTypesOnTrack(new List<TrainCarLivery> { flat, flat, flat }, new List<bool> { false, false, false },
                     world.Network.Tracks[spot.Track], true, true);
+                // A loco that isn't the player's (as a career's company locos and spawned ones are), on another free track of the yard.
+                var other = yard.Tracks.Find(t => t != spot && t.Length > 60 && !world.Occupancy.IsOccupied(t.Track, int.MinValue));
+                var de2 = DV.Globals.G.Types.Liveries.FirstOrDefault(l => l.id == "LocoDE2");
+                if (other != null && de2 != null)
+                {
+                    unowned = CarSpawner.Instance.SpawnCarTypesOnTrack(new List<TrainCarLivery> { de2 }, new List<bool> { false },
+                        world.Network.Tracks[other.Track], true, true)?.FirstOrDefault();
+                    Line(unowned != null ? $"an unowned DE2 {unowned.ID} spawned on {world.Network.Describe(other.Track)}, uniqueCar {unowned.uniqueCar}" : "the unowned DE2 couldn't be spawned");
+                }
                 break;
             }
             yield return new WaitForSeconds(3);
-            yield return TabletTour(s, spawned);
+            yield return TabletTour(s, spawned, unowned);
             s.Stop(secure: true);
             Line("tablet put away");
         }
@@ -1017,7 +1027,7 @@ namespace AIEngineer.Diagnostics
         /// is pressed through the screen's own button; on the map, a spawned
         /// cut is picked, its first order given, and undone.
         /// </summary>
-        private static IEnumerator TabletTour(Session s, List<TrainCar> cut)
+        private static IEnumerator TabletTour(Session s, List<TrainCar> cut, TrainCar unowned)
         {
             var camera = PlayerManager.ActiveCamera;
             var template = Held.EngineerTablet.Template;
@@ -1087,6 +1097,10 @@ namespace AIEngineer.Diagnostics
             yield return new WaitForSeconds(2);
             SaveScreen(screen, "tablet-map");
             Line($"tablet-map: {UI.Tablet.TabletMap.Describe()}");
+            // The pages' worn paper and the route map's stained grid replaced by the flat background (the Comms Tablet's, 88da470).
+            var paper = Game.BookletRenderer.PaperReplaced;
+            (paper.Count > 0 ? (Action<string, string>)Pass : Fail)("tablet map background",
+                paper.Count > 0 ? "the paper replaced by the flat background: " + string.Join(", ", paper.Select(kv => $"{kv.Key} x{kv.Value}")) : "no paper sprite was replaced");
             // The map's own plates, clicked through their buttons: the station tabs' arrows, down, up, and down
             // again (a button clicked a second time), a yard's letter, the lit letter again (up a level).
             var set = UI.Tablet.TabletMap.TabSetShown;
@@ -1146,6 +1160,7 @@ namespace AIEngineer.Diagnostics
                 yield return new WaitForSeconds(1);
                 var undone = UI.Tablet.TabletUi.UndoForTest();
                 (undone && s.Engineer.Queue.Count == before ? (Action<string, string>)Pass : Fail)("tablet undo", $"undo {(undone ? "pressed" : "not offered")}: {s.Engineer.Queue.Count} orders, {before} before the order");
+                yield return UnownedPick(s, unowned, car, screen);
                 var station = UI.Tablet.TabletMap.StationShown;
                 if (station != null)
                 {
@@ -1197,6 +1212,50 @@ namespace AIEngineer.Diagnostics
             }
             (inKit == 1 && data.GetBool(Held.EngineerTabletStartingItems.GivenKey) == true && sold && tags > 0 ? (Action<string, string>)Pass : Fail)("tablet standalone",
                 $"merged with a Comms Tablet: {merged}; in a new save's kit {inKit} time(s), key {data.GetBool(Held.EngineerTabletStartingItems.GivenKey)}; sold {sold}, {tags} shelf tags");
+        }
+
+        /// <summary>
+        /// A loco that isn't the player's, picked by hand on the map ("Give orders to it"), stays picked
+        /// through the tablet's list refresh (0.15.1 dropped it within a second, whydidimake's "i cant get
+        /// a third one"), has its plate, and its first order goes to it, not to the engineer before.
+        /// </summary>
+        private static IEnumerator UnownedPick(Session s, TrainCar unowned, TrainCar cutCar, Held.EngineerTabletScreen screen)
+        {
+            if (unowned == null || cutCar == null)
+            {
+                Fail("tablet unowned loco", unowned == null ? "no unowned loco was spawned" : "no cut to order it to");
+                yield break;
+            }
+            var sBefore = s.Engineer.Queue.Count;
+            var pickedLoco = UI.Tablet.TabletMap.PickForTest(unowned);
+            var pressed = pickedLoco ? UI.Tablet.TabletMap.DoForTest(0) : null;
+            var chosenAtOnce = UI.Tablet.TabletUi.Chosen == unowned;
+            yield return new WaitForSeconds(2);
+            screen.DrawNow();
+            yield return null;
+            var stillChosen = UI.Tablet.TabletUi.Chosen == unowned;
+            var listed = UI.Tablet.TabletUi.Engineers.Contains(unowned);
+            SaveScreen(screen, "tablet-unowned");
+            var cutPicked = UI.Tablet.TabletMap.PickForTest(cutCar);
+            var order = cutPicked ? UI.Tablet.TabletMap.DoForTest(0) : null;
+            var theirs = Host.SessionFor(unowned, false);
+            var took = theirs != null && theirs.Engineer.Queue.Count > 0 && theirs.Engineer.Queue[0].Action == WaypointAction.Couple;
+            var others = s.Engineer.Queue.Count == sBefore;
+            (pressed == "Give orders to it" && chosenAtOnce && stillChosen && listed && took && others ? (Action<string, string>)Pass : Fail)("tablet unowned loco",
+                $"{unowned.ID} (uniqueCar {unowned.uniqueCar}): \"{pressed}\" pressed, chosen {chosenAtOnce}; 2 s later chosen {stillChosen}, on the list {listed} " +
+                $"({string.Join(", ", UI.Tablet.TabletUi.Engineers.Select(l => l.ID))}); \"{order}\": {unowned.ID} has {theirs?.Engineer.Queue.Count ?? 0} orders" +
+                $"{(took ? $", first {theirs.Engineer.Queue[0].Action}" : "")}; {s.Loco.ID} {s.Engineer.Queue.Count} orders, {sBefore} before");
+            yield return new WaitForSeconds(1);
+            UI.Tablet.TabletUi.UndoForTest();
+            theirs?.Stop(secure: true);
+            try
+            {
+                // Outside a draw, a choice asks for a redraw by throwing, as the other hooks catch.
+                UI.Tablet.TabletUi.Choose(s.Loco);
+            }
+            catch (UI.Tablet.TabletSurface.Redraw)
+            {
+            }
         }
 
         /// <summary>Holds the test's tablet up before the camera for a few frames, its screen to it, as a held tablet is seen.</summary>

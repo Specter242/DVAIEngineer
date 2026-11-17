@@ -1,5 +1,19 @@
 # AI Engineer: changelog
 
+## 0.15.2 (2026-11-17)
+
+- Fixed: a loco that isn't yours (a company loco, or one you spawned), picked
+  on the tablet's map with "Give orders to it", now stays picked and gets its
+  plate, so its first order gives it an engineer. Before, the tablet dropped
+  it within a second and the order went to one of your other engineers. The
+  Comms Tablet's Engineers app has the same fix.
+- The tablet's top bar always shows the plate of the loco you're giving
+  orders to, even when you have more engineers than fit.
+- The map has a clean, flat background, as the Comms Tablet's own map has,
+  instead of the booklet's worn paper and the route map's stained grid, and
+  its title is darker so it reads on it. On the Comms Tablet's Engineers app
+  too.
+
 ## 0.15.1 (2026-11-17)
 
 First public release.

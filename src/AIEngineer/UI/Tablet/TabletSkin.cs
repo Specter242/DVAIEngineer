@@ -24,6 +24,13 @@ namespace AIEngineer.UI.Tablet
                 l.Bold = bold.Value;
             return l;
         }
+
+        public Look Tinted(Color text)
+        {
+            var l = (Look)MemberwiseClone();
+            l.Text = text;
+            return l;
+        }
     }
 
  internal static class TabletSkin

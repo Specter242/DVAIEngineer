@@ -504,8 +504,13 @@ namespace AIEngineer.UI.Tablet
         private static void DrawTitle(BookletPage page)
         {
             var title = page.IsRoute ? "Route map" : $"{page.Source.StationName} · {page.Station}-{page.Yard} · {Title(page.Title)}";
-            Label(S(136, 16, 760, 40), title, Section);
+            Label(S(136, 16, 760, 40), title, TitleLook);
         }
+
+        /// <summary>The title in dark brown, not the soft beige: legible on the map's light, flat background (as the Comms Tablet's map).</summary>
+        private static Look TitleLook => titleLook ?? (titleLook = Section.With(TextAnchor.MiddleLeft, true).Tinted(Hex("4b3a29")));
+
+        private static Look titleLook;
 
         private static string Title(string s) => string.IsNullOrEmpty(s) ? "" : char.ToUpperInvariant(s[0]) + s.Substring(1).ToLowerInvariant();
 

@@ -20,8 +20,17 @@ namespace AIEngineer.Game
     /// </summary>
     internal static class BookletRenderer
     {
-        /// <summary>The paper's color, past the page's own paper.</summary>
-        public static readonly Color Paper = new Color(0.86f, 0.89f, 0.9f);
+ public static readonly Color Paper = new Color(0.925f, 0.91f, 0.875f);
+
+        /// <summary>The pages' own paper: the booklet's scuffed sheets, its cover's, and the route map's stained, gridded one.</summary>
+        private static bool IsPaper(string sprite) =>
+            sprite != null && (sprite.StartsWith("Bk_Bg", StringComparison.Ordinal) || sprite.StartsWith("RouteMap_Background", StringComparison.Ordinal)
+                               || sprite == "MapSchematicCoverBg");
+
+#if !PUBLIC_RELEASE
+        /// <summary>The paper the copies had, as replaced (the sprites' names and how many), for the self-test's log.</summary>
+        public static readonly Dictionary<string, int> PaperReplaced = new Dictionary<string, int>();
+#endif
 
         // A page's parts the tablet shows its own way: the header, the tabs, the route map's title.
         private static readonly HashSet<string> Hidden = new HashSet<string>(StringComparer.Ordinal)
@@ -132,7 +141,12 @@ namespace AIEngineer.Game
             return true;
         }
 
-        /// <summary>Once per copy: the parts the tablet shows its own way hidden.</summary>
+        /// <summary>
+        /// Once per copy: the parts the tablet shows its own way hidden, and
+        /// the pages' paper made flat in <see cref="Paper"/>: the sprite let
+        /// go, the image kept (a mask on it still masks), its color the
+        /// background's.
+        /// </summary>
         private static void Prepare(GameObject holder)
         {
             if (preparedFor == holder)
@@ -141,6 +155,33 @@ namespace AIEngineer.Game
             foreach (var t in holder.GetComponentsInChildren<Transform>(true))
                 if (Hidden.Contains(t.name))
                     t.gameObject.SetActive(false);
+#if !PUBLIC_RELEASE
+            PaperReplaced.Clear();
+#endif
+            foreach (var image in holder.GetComponentsInChildren<UnityEngine.UI.Image>(true))
+            {
+                var name = image.sprite != null ? image.sprite.name : null;
+                if (!IsPaper(name))
+                    continue;
+                image.sprite = null;
+                image.overrideSprite = null;
+                image.type = UnityEngine.UI.Image.Type.Simple;
+                image.color = Paper;
+#if !PUBLIC_RELEASE
+                PaperReplaced[name] = PaperReplaced.TryGetValue(name, out var n) ? n + 1 : 1;
+#endif
+            }
+            foreach (var raw in holder.GetComponentsInChildren<UnityEngine.UI.RawImage>(true))
+            {
+                var name = raw.texture != null ? raw.texture.name : null;
+                if (!IsPaper(name))
+                    continue;
+                raw.texture = null;
+                raw.color = Paper;
+#if !PUBLIC_RELEASE
+                PaperReplaced[name] = PaperReplaced.TryGetValue(name, out var n) ? n + 1 : 1;
+#endif
+            }
         }
 
         private static void EnsureCamera()
