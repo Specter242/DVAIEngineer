@@ -2,6 +2,11 @@
   "Releases": [
     {
       "Id": "AIEngineer",
+      "Version": "0.15.3",
+      "DownloadUrl": "https://github.com/Specter242/DVAIEngineer/releases/download/v0.15.3/AIEngineer-0.15.3.zip"
+    },
+    {
+      "Id": "AIEngineer",
       "Version": "0.15.2",
       "DownloadUrl": "https://github.com/Specter242/DVAIEngineer/releases/download/v0.15.2/AIEngineer-0.15.2.zip"
     },
