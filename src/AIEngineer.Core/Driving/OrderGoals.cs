@@ -255,7 +255,7 @@ namespace AIEngineer.Core.Driving
         /// </summary>
         public static List<WaypointGoal> CoupleOnward(TrackGraph graph, TrainState train, CutEnd target, Func<int, int> selectedBranch)
         {
-            var ends = train.CarCount <= 1 ? new[] { ConsistEnd.A, ConsistEnd.B } : new[] { train.LocoEnd.Other() };
+            var ends = train.LightEngine ? new[] { ConsistEnd.A, ConsistEnd.B } : new[] { train.LocoEnd.Other() };
             foreach (var end in ends)
             {
                 var at = end == ConsistEnd.A ? train.EndA : train.EndB;

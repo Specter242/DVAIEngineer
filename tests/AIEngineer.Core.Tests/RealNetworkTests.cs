@@ -151,6 +151,50 @@ public class RealNetworkTests
         Assert.True(found >= tries * 0.9, $"only {found} of {tries} routes");
     }
 
+    /// <summary>The router's cost on the real map is the meters the train runs, its reversals, and its shoving, each counted once.</summary>
+    [Fact]
+    public void TheSearchPricesShovingAsTheTrainRunsIt()
+    {
+        var path = ExportPath;
+        if (path == null)
+            return;
+        var (g, _, _) = Load(path);
+        var router = new Router(g);
+        var candidates = Enumerable.Range(0, g.TrackCount).Where(t => g.Length(t) > 180).ToArray();
+        var random = new Random(7);
+        var found = 0;
+        var reversing = 0;
+        for (var k = 0; k < 600; k++)
+        {
+            var from = candidates[random.Next(candidates.Length)];
+            var to = candidates[random.Next(candidates.Length)];
+            var at = g.Length(from) / 2 - 50;
+            var shoving = (ConsistEnd)(k % 2);
+            var request = new RouteRequest
+            {
+                EndA = new TrackPosition(from, at),
+                OutwardA = TrackDirection.Backward,
+                EndB = new TrackPosition(from, at + 100),
+                OutwardB = TrackDirection.Forward,
+                TrainLength = 100,
+                Goal = new TrackPosition(to, g.Length(to) / 2),
+                LastLeader = k % 3 == 0 ? shoving : k % 3 == 1 ? shoving.Other() : null,
+                ShovingEnd = shoving,
+                DivergingPenalty = 0,
+            };
+            var route = router.Find(request);
+            if (route == null)
+                continue;
+            found++;
+            if (route.Reversals > 0)
+                reversing++;
+            var shoved = route.Legs.Where(l => l.Leader == shoving).Sum(l => l.Running);
+            Assert.Equal(route.Running + request.ReversalPenalty * route.Reversals + shoved, route.SearchCost, 3);
+        }
+        output.WriteLine($"{found} routes, {reversing} with reversals");
+        Assert.True(found > 300 && reversing > 50, $"{found} routes, {reversing} with reversals");
+    }
+
     /// <summary>
     /// Drives random routes on the real network as a train's body would
     /// follow them: every piece joined by a real link (never branch to
@@ -219,6 +263,7 @@ public class RealNetworkTests
                 Goal = new TrackPosition(to, g.Length(to) * random.NextDouble()),
                 LastLeader = random.Next(3) == 0 ? (ConsistEnd)random.Next(2) : null,
                 GoalDirection = random.Next(3) == 0 ? (random.Next(2) == 0 ? TrackDirection.Forward : TrackDirection.Backward) : null,
+                ShovingEnd = random.Next(2) == 0 ? (ConsistEnd)random.Next(2) : null,
                 Blocked = standing,
                 SwitchLie = j => selected[j],
             };

@@ -24,6 +24,21 @@ namespace AIEngineer.Core.Driving
 
         public int CarCount;
 
+        /// <summary>How many of those cars are power (locos, tenders, slugs); the engineer's own loco is always one, so 0 reads as 1.</summary>
+        public int PowerCars;
+
+        /// <summary>Whether the car at the end away from the loco is power too: then neither way is shoving.</summary>
+        public bool PowerAtFarEnd;
+
+        /// <summary>The cars the power is moving: what a train carries, and all that can be cut off.</summary>
+        public int WagonCount => Math.Max(0, CarCount - Math.Max(1, PowerCars));
+
+        /// <summary>Power alone: a loco, with any tender, second unit, or slug.</summary>
+        public bool LightEngine => WagonCount == 0;
+
+        /// <summary>The end whose leading is shoving cars; null running light or with power at both ends.</summary>
+        public ConsistEnd? ShovingEnd => LightEngine || PowerAtFarEnd ? (ConsistEnd?)null : LocoEnd.Other();
+
         /// <summary>The end the reverser drives toward as it stands now; null in neutral or unknown.</summary>
         public ConsistEnd? Reverser;
 
@@ -860,7 +875,7 @@ namespace AIEngineer.Core.Driving
                 // Coupled to more than the order wants: cut the rest off again where they stand.
                 var coupled = train.CarCount - carsAtOrderStart;
                 var extra = wp.CutAfterCoupling != null ? wp.CutAfterCoupling() : coupled - wp.KeepCars.Value;
-                extra = Math.Min(extra, Math.Max(0, train.CarCount - 1));
+                extra = Math.Min(extra, train.WagonCount);
                 actionIssued = true;
                 if (coupled > 0 && extra > 0)
                 {
@@ -872,7 +887,7 @@ namespace AIEngineer.Core.Driving
             }
             if (wp.Action == WaypointAction.Uncouple && !actionIssued)
             {
-                var cars = Math.Min(wp.CutCount != null ? wp.CutCount() : wp.CarCount, Math.Max(0, train.CarCount - 1));
+                var cars = Math.Min(wp.CutCount != null ? wp.CutCount() : wp.CarCount, train.WagonCount);
                 actionIssued = true;
                 if (cars <= 0)
                 {
@@ -941,7 +956,19 @@ namespace AIEngineer.Core.Driving
             wp.ArrivalMet = !missed;
             var label = wp.Label ?? "the waypoint";
             string note = null;
-            if (missed)
+            if (missed && IsFacing(wp))
+            {
+                // A coupling's facing is the default, no choice of the player's (no control sets it): logged, once an order.
+                if (!ReferenceEquals(facingLoggedFor, wp))
+                {
+                    facingLoggedFor = wp;
+                    LogNote = facingGivenUp.HasValue
+                        ? $"coupling to {label} {Describe(wp.Arrival == Arrival.BackFirst ? Arrival.FrontFirst : Arrival.BackFirst, coupling: true)}: "
+                          + $"turning it first would add about {Math.Max(0, Math.Round(facingGivenUp.Value.Meters / 100) * 100):F0} m and {Math.Max(0, facingGivenUp.Value.Reversals)} reversals"
+                        : $"no way to turn it to couple to {label} {Describe(wp.Arrival, coupling: true)}; coupling anyway";
+                }
+            }
+            else if (missed)
             {
                 note = wp.Action == WaypointAction.Couple
                     ? $"no way to turn it to couple to {label} {Describe(wp.Arrival, coupling: true)}; coupling anyway"
@@ -970,13 +997,33 @@ namespace AIEngineer.Core.Driving
         /// <summary>What a route that arrives the wrong way round costs, ranking it after every one that doesn't, m.</summary>
         private const double WrongWayCost = 1e5;
 
+        /// <summary>
+        /// How much more a light loco's route may cost, by the router's
+        /// reckoning (its running and 400 m a reversal), to couple facing as
+        /// asked (away from the cars, by default) before it couples the other
+        /// way round, m. Turning a loco means a wye or a loop, often kilometers
+        /// off, and every loco drives either way (a player, 17 Nov 2026:
+        /// "trying to couple with the back of the train only even when it's
+        /// faster ... to couple with the front").
+        /// </summary>
+        private const double FacingAllowance = 1000;
+
+        // Set when a light loco couples facing the other way, as turning it would have cost more than the allowance: what turning adds.
+        private (double Meters, int Reversals)? facingGivenUp;
+
+        // The order whose facing has been logged: its numbers change as it replans, the line is written once.
+        private Waypoint facingLoggedFor;
+
+        private static bool IsFacing(Waypoint wp) =>
+            wp.Action == WaypointAction.Couple && (wp.Arrival == Arrival.BackFirst || wp.Arrival == Arrival.FrontFirst);
+
         /// <summary>What a second-choice goal costs, ranking it after every first choice (the right end before the right way round), m.</summary>
         private const double SecondChoiceCost = 1e6;
 
         /// <summary>The consist end an arrival asks to lead the last leg; null for any.</summary>
         public static ConsistEnd? Leader(Arrival arrival, TrainState train, bool intoDeadEnd = false)
         {
-            var light = train.CarCount <= 1;
+            var light = train.LightEngine;
             switch (arrival)
             {
                 case Arrival.CarsFirstIntoDeadEnd:
@@ -1020,6 +1067,9 @@ namespace AIEngineer.Core.Driving
         /// <summary>The last thing worth telling the player about an order (cleared when read).</summary>
         public string Note { get; set; }
 
+        /// <summary>The last thing worth logging about an order but not telling the player (cleared when read).</summary>
+        public string LogNote { get; set; }
+
         /// <summary>
         /// Why the engineer stands and starts no order for the moment, said
         /// as its status; null lets it work its queue. A job run sets it
@@ -1039,6 +1089,9 @@ namespace AIEngineer.Core.Driving
             Route best = null;
             fouledOnTheWay = false;
             wrongWayOnly = false;
+            facingGivenUp = null;
+            // A light loco's facing for a coupling is a preference, not worth a long way round to turn it.
+            var softFacing = lastLeader.HasValue && !wp.ArrivalRequired && train.LightEngine && IsFacing(wp);
             var bestIndex = -1;
             var bestCost = double.PositiveInfinity;
             missed = false;
@@ -1056,6 +1109,8 @@ namespace AIEngineer.Core.Driving
                     Goal = goal.Position,
                     GoalDirection = goal.Arrive,
                     LastLeader = lastLeader,
+                    // Its cars ahead of the loco: priced, so the loco leads on the road.
+                    ShovingEnd = train.ShovingEnd,
                     SwitchLie = world.SelectedBranch,
                     // A coupling runs on from where it stands; it isn't backed away from its cars.
                     AllowBackOnto = wp.Action != WaypointAction.Couple,
@@ -1076,7 +1131,22 @@ namespace AIEngineer.Core.Driving
                 };
                 var extra = goal.Instead != null ? SecondChoiceCost : 0;
                 var wrongWay = false;
+                (double Meters, int Reversals)? givenUp = null;
                 var candidate = world.Router.Find(request, out var why);
+                if (candidate != null && softFacing)
+                {
+                    request.LastLeader = null;
+                    var either = world.Router.Find(request, out _);
+                    request.LastLeader = lastLeader;
+                    if (either != null && either.Legs[either.Legs.Count - 1].Leader != lastLeader.Value
+                        && either.Cost(request) + FacingAllowance < candidate.Cost(request))
+                    {
+                        givenUp = (candidate.Running - either.Running, candidate.Reversals - either.Reversals);
+                        candidate = either;
+                        wrongWay = true;
+                        extra += FacingAllowance;
+                    }
+                }
                 if (candidate == null && lastLeader.HasValue && wp.ArrivalRequired)
                     wrongWayOnly = true;
                 if (candidate == null && lastLeader.HasValue && !wp.ArrivalRequired)
@@ -1092,13 +1162,14 @@ namespace AIEngineer.Core.Driving
                         failure = why;
                     continue;
                 }
-                var cost = candidate.Length + request.ReversalPenalty * candidate.Reversals + extra;
+                var cost = candidate.Cost(request) + extra;
                 if (cost < bestCost)
                 {
                     best = candidate;
                     bestIndex = g;
                     bestCost = cost;
                     missed = wrongWay;
+                    facingGivenUp = givenUp;
                 }
             }
             route = best;
@@ -1135,7 +1206,7 @@ namespace AIEngineer.Core.Driving
             var switches = new List<SwitchSetting>(last.Switches);
             foreach (var sw in more.Switches)
                 switches.Add(new SwitchSetting(sw.Junction, sw.Branch, last.Length + sw.AtDistance));
-            legs[legs.Count - 1] = new RouteLeg(pieces, switches, last.Leader, false);
+            legs[legs.Count - 1] = new RouteLeg(pieces, switches, last.Leader, false, last.StartOverlap);
             return new Route(legs);
         }
 

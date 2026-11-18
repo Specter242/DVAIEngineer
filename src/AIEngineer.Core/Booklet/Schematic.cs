@@ -6,8 +6,29 @@ using AIEngineer.Core.Tracks;
 namespace AIEngineer.Core.Booklet
 {
     /// <summary>
+    /// A page's touch grid. The game divides its touch screen by the grid
+    /// (<c>TouchscreenBase.sectionSize</c>: the collider's size over
+    /// <c>gridSize</c>), so a cell is the touch area over the grid, not a
+    /// fixed 50. The touch area is the item's, the same whatever the grid:
+    /// the route map's whole 1,600 x 1,600 canvas (stock, 32 cells of 50;
+    /// Double Track's rebuilt map, 40 of 40), a booklet page's middle
+    /// 1,150 x 1,550 of its 1,238 x 1,641 (23 x 31 cells of 50).
+    /// </summary>
+    public static class TouchGrid
+    {
+        /// <summary>The middle of cell (<paramref name="column"/>, <paramref name="row"/>) of a touch area
+        /// <paramref name="width"/> by <paramref name="height"/>, from the area's middle, x right and y up.</summary>
+        public static (double X, double Y) CellMiddle(double width, double height, int columns, int rows, int column, int row)
+        {
+            if (columns <= 0 || rows <= 0)
+                throw new ArgumentOutOfRangeException(columns <= 0 ? nameof(columns) : nameof(rows), "a touch grid has at least one cell each way");
+            return ((column + 0.5) * width / columns - width / 2, (row + 0.5) * height / rows - height / 2);
+        }
+    }
+
+    /// <summary>
     /// One piece of a page's schematic as the game's render draws it: a
-    /// sprite in a box, in the schematic's own units (a cell is 50), x to the
+    /// sprite in a box, in the schematic's own units (a stock cell is 50), x to the
     /// right and y up, turned counterclockwise by its rotation. A negative
     /// width or height is a mirrored piece.
     /// </summary>

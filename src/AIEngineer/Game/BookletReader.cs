@@ -32,8 +32,6 @@ namespace AIEngineer.Game
     /// </summary>
     internal static class BookletReader
     {
-        private const float Cell = 50f;
-
         private static readonly Regex PageName = new Regex(@"^\[(\w+)-(\w+)\]$", RegexOptions.CultureInvariant);
 
         private static readonly MethodInfo PaperData = typeof(StaticTextureRenderBase).GetMethod("GetStaticTemplatePaperData", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -79,7 +77,7 @@ namespace AIEngineer.Game
                 }
                 var read = watch.ElapsedMilliseconds;
                 booklet = Booklet.Build(sources, network.Graph, t => network.Tracks[t].name);
-                Main.Log($"Booklet: {booklet.Stations.Count} stations, {sources.Count} pages, read in {read} ms, matched in {watch.ElapsedMilliseconds - read} ms: {booklet.Stats}");
+                Main.Log($"Booklet: {booklet.Stations.Count} stations, {sources.Count} pages, read in {read} ms, matched in {watch.ElapsedMilliseconds - read} ms: {booklet.Stats}; touch grids: {Grids}");
             }
             catch (Exception e)
             {
@@ -190,6 +188,17 @@ namespace AIEngineer.Game
             return t != null ? t.text.Trim() : null;
         }
 
+        /// <summary>The item's touch area, in canvas units and centred on the page's canvas: the area the game divides by
+        /// the grid, the same whatever the grid (the stock grids in cells of 50). The render pages don't hold the item's
+        /// collider; the self-test checks these by every drawn switch being named.</summary>
+        private static readonly Vector2 RouteTouchArea = new Vector2(1600, 1600), BookletTouchArea = new Vector2(1150, 1550);
+
+        private static readonly Dictionary<string, string> grids = new Dictionary<string, string>();
+
+        /// <summary>The touch grids read, each page kind's last: its cells, on its touch area, of its canvas
+        /// ("route map 40 x 40 on 1600 x 1600 of 1600 x 1600").</summary>
+        public static string Grids => string.Join(", ", grids.Select(kv => $"{kv.Key} {kv.Value}"));
+
         private static SchematicSource ReadPage(Network network, Transform page, List<RectTransform> roots, JunctionGeneratedDataRuntime.JunctionPageData cells, Vector2Int grid, bool isRoute)
         {
             var schematic = roots[0];
@@ -213,10 +222,17 @@ namespace AIEngineer.Game
                     tiles.Add(new SchematicTile(image.sprite.name, at.x, at.y, turn, rt.rect.width * scale.x, rt.rect.height * scale.y));
                 }
             }
-            // Each touch cell's middle on the page, then on the schematic: the page's canvas holds the grid, centred.
+            // Each touch cell's middle on the page, then on the schematic: the game divides the item's touch area by
+            // the grid (Double Track's route map: 40 cells of 40 on the same 1,600, not the stock 32 of 50).
             var canvas = page.GetComponentsInChildren<RectTransform>(true).FirstOrDefault(t => t.name == "Template Canvas") ?? (RectTransform)page;
             var size = canvas.rect.size;
-            float left = (size.x - grid.x * Cell) / 2, bottom = (size.y - grid.y * Cell) / 2;
+            var area = isRoute ? RouteTouchArea : BookletTouchArea;
+            grids[isRoute ? "route map" : "booklet"] = $"{grid.x} x {grid.y} on {area.x:F0} x {area.y:F0} of {size.x:F0} x {size.y:F0}";
+            if (grid.x <= 0 || grid.y <= 0)
+            {
+                Main.Warn($"Booklet page {page.name}: its touch grid is {grid.x} x {grid.y}; its switches are left unnamed");
+                grid = Vector2Int.zero;
+            }
             var switches = new List<SchematicSwitch>();
             var ordered = RailTrackRegistryBase.Junctions;
             foreach (var c in cells.junctionDataCoords ?? new List<JunctionGeneratedDataRuntime.DataCoord>())
@@ -224,7 +240,10 @@ namespace AIEngineer.Game
                 var index = c.data.junctionIndex;
                 if (index < 0 || index >= ordered.Length || ordered[index] == null || !network.TryGetJunction(ordered[index], out var j))
                     continue;
-                var onCanvas = new Vector3(left + (c.coord.x + 0.5f) * Cell - size.x / 2, bottom + (c.coord.y + 0.5f) * Cell - size.y / 2, 0);
+                if (grid == Vector2Int.zero)
+                    break;
+                var (cx, cy) = TouchGrid.CellMiddle(area.x, area.y, grid.x, grid.y, c.coord.x, c.coord.y);
+                var onCanvas = new Vector3((float)cx, (float)cy, 0);
                 // The canvas's own pivot is its middle on the game's pages; allow for one that isn't.
                 onCanvas += new Vector3((0.5f - canvas.pivot.x) * size.x, (0.5f - canvas.pivot.y) * size.y, 0);
                 var at = schematic.InverseTransformPoint(canvas.TransformPoint(onCanvas));

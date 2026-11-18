@@ -66,7 +66,7 @@ namespace AIEngineer.Core.Routing
         private readonly double[] pieceStart;
         private readonly SwitchSetting[] switches;
 
-        public RouteLeg(IReadOnlyList<RoutePiece> pieces, IReadOnlyList<SwitchSetting> switches, ConsistEnd leader, bool endsInReversal)
+        public RouteLeg(IReadOnlyList<RoutePiece> pieces, IReadOnlyList<SwitchSetting> switches, ConsistEnd leader, bool endsInReversal, double startOverlap = 0)
         {
             if (pieces == null || pieces.Count == 0)
                 throw new ArgumentException("A leg needs at least one piece.", nameof(pieces));
@@ -85,6 +85,7 @@ namespace AIEngineer.Core.Routing
             this.switches = sorted.ToArray();
             Leader = leader;
             EndsInReversal = endsInReversal;
+            StartOverlap = Math.Max(0, Math.Min(startOverlap, Length));
         }
 
         public IReadOnlyList<RoutePiece> Pieces => pieces;
@@ -92,6 +93,16 @@ namespace AIEngineer.Core.Routing
         public IReadOnlyList<SwitchSetting> Switches => switches;
 
         public double Length { get; }
+
+        /// <summary>
+        /// How much of the leg's start the train doesn't run: a leg after a
+        /// reversal begins where the old leading end stopped, a train's length
+        /// beyond the new leading end, so that end is found on it.
+        /// </summary>
+        public double StartOverlap { get; }
+
+        /// <summary>The meters the train runs on this leg.</summary>
+        public double Running => Length - StartOverlap;
 
         /// <summary>The consist end leading on this leg.</summary>
         public ConsistEnd Leader { get; }
@@ -169,9 +180,14 @@ namespace AIEngineer.Core.Routing
                 throw new ArgumentException("A route needs at least one leg.", nameof(legs));
             Legs = legs;
             var total = 0.0;
+            var running = 0.0;
             foreach (var l in legs)
+            {
                 total += l.Length;
+                running += l.Running;
+            }
             Length = total;
+            Running = running;
         }
 
         public IReadOnlyList<RouteLeg> Legs { get; }
@@ -179,6 +195,27 @@ namespace AIEngineer.Core.Routing
         /// <summary>The total distance the leading ends travel, in meters.</summary>
         public double Length { get; }
 
+        /// <summary>The meters the train runs, each leg's overlap with the one before left out.</summary>
+        public double Running { get; }
+
+        /// <summary>What the router's search reckoned the route cost, with every penalty of the request; 0 for a route it didn't build.</summary>
+        public double SearchCost { get; internal set; }
+
         public int Reversals => Legs.Count - 1;
+
+        /// <summary>The route's cost for ranking it against others: its length, its reversals, and the meters run shoving.</summary>
+        public double Cost(RouteRequest request)
+        {
+            var cost = Length + request.ReversalPenalty * Reversals;
+            if (request.ShovingEnd.HasValue)
+            {
+                foreach (var leg in Legs)
+                {
+                    if (leg.Leader == request.ShovingEnd.Value)
+                        cost += leg.Running * request.ShovingCost;
+                }
+            }
+            return cost;
+        }
     }
 }

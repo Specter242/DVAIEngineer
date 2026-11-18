@@ -881,7 +881,7 @@ namespace AIEngineer.Game
             foreach (var goal in goals)
             {
                 var request = Request(state, goal);
-                if (carsFirst && state.CarCount > 1)
+                if (carsFirst && !state.LightEngine)
                     request.LastLeader = state.LocoEnd.Other();
                 var route = world.Router.Find(request, out _);
                 if (route != null)
@@ -1411,13 +1411,10 @@ namespace AIEngineer.Game
             }
             // Locos coupled next to the engineer's own (a second unit, a slug, a tender) are its
             // power, not cars: never set aside, put back, or cut off as strangers.
-            while (list.Count > 0 && IsPower(list[list.Count - 1]))
+            while (list.Count > 0 && Session.IsPower(list[list.Count - 1]))
                 list.RemoveAt(list.Count - 1);
             return list;
         }
-
-        private static bool IsPower(TrainCar car) =>
-            car != null && (car.IsLoco || CarTypes.IsAnyLocomotiveOrTender(car.carLivery) || CarTypes.IsSlug(car.carLivery));
 
         private static Coupler FarCoupler(Session session)
         {

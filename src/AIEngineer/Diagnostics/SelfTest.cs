@@ -71,7 +71,7 @@ namespace AIEngineer.Diagnostics
                         var text = File.ReadAllText(trigger);
                         quitAfter = text.IndexOf("quit", StringComparison.OrdinalIgnoreCase) >= 0;
                         // "only=jobs,dispatcher": just those parts (settings, drive, jobs, industry, dispatcher, tablet, steam,
-                        // helper; "windows", the tablet part's old name, still runs it).
+                        // helper, turning; "windows", the tablet part's old name, still runs it).
                         foreach (var line in text.Split('\n'))
                         {
                             var l = line.Trim();
@@ -247,7 +247,8 @@ namespace AIEngineer.Diagnostics
             log = new StreamWriter(Path.Combine(FolderPath, "selftest.log"), false) { AutoFlush = true };
             startTime = Time.realtimeSinceStartup;
             Line($"self-test start, game {Application.version}");
-            yield return new WaitForSeconds(20);
+            // Real time: the game pauses under a notice when a save's player is moved to a station (Double Track's tracks).
+            yield return new WaitForSecondsRealtime(20);
 
             var world = Host.World;
             if (world == null)
@@ -277,7 +278,19 @@ namespace AIEngineer.Diagnostics
                 var stats = booklet.Stats;
                 var ok = booklet.Stations.Count > 0 && stats.SwitchesNamed == stats.Switches && stats.Matched >= stats.Runs * 0.95;
                 (ok ? (Action<string, string>)Pass : Fail)("booklet", $"{booklet.Stations.Count} stations: {stats}");
+                // The route map's switches, named by their touch cells: a cell placed 25 % off (a 40-cell grid read as 50s,
+                // Double Track's) names none, as the matcher takes a cell within 10 units of a drawn switch.
+                var route = booklet.Route?.Schematic.Switches;
+                var routeNamed = route?.Count(sw => sw.Junction >= 0) ?? 0;
+                (route != null && route.Count > 0 && routeNamed == route.Count ? (Action<string, string>)Pass : Fail)("booklet route map",
+                    $"{routeNamed} of {route?.Count ?? 0} drawn switches named by their touch cells; touch grids: {Game.BookletReader.Grids}");
                 CaptureBookletPages(booklet);
+            }
+            if (Time.timeScale == 0)
+            {
+                Line("the game is paused (a notice on loading); the parts that need it running are left out");
+                Finish();
+                yield break;
             }
 
             var idleFrame = 0f;
@@ -333,6 +346,8 @@ namespace AIEngineer.Diagnostics
                 yield return SteamPart();
             if (Part("helper"))
                 yield return HelperPart();
+            if (Part("turning"))
+                yield return TurningPart();
 
             Line($"slowest engineer tick {Session.SlowestTickMs:F2} ms; slowest job-run tick {Session.SlowestJobsTickMs:F2} ms");
             Finish();
@@ -729,7 +744,7 @@ namespace AIEngineer.Diagnostics
 
         private static IEnumerator QuitSoon()
         {
-            yield return new WaitForSeconds(3);
+            yield return new WaitForSecondsRealtime(3);
             Application.Quit();
         }
 

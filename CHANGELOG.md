@@ -1,5 +1,23 @@
 # AI Engineer: changelog
 
+## 0.15.3 (2026-11-18)
+
+- Your engineer keeps the loco in front on the road. A train with its cars
+  ahead of the loco used to shove them all the way to the next station. Now
+  it turns on a wye or loop if one is within reach and runs loco first,
+  backing up only at the end, where a track needs the cars first. Short
+  shoves in a yard work as before.
+- Sent to pick up cars, a loco no longer goes the long way round just to
+  arrive facing away from them. If turning would add more than about 1 km,
+  it couples on facing the cars.
+- A loco with only its tender or a second unit now counts as running light.
+- Fixed: a steam loco with a tender could wait forever at "Releasing the
+  brakes".
+- Fixed: with Double Track, the tablet's route map page couldn't find its
+  switches, so it could miss which way they were set, your engineer's route,
+  and trains out on the line.
+- The Comms Tablet's Engineers app has all of these too.
+
 ## 0.15.2 (2026-11-17)
 
 - Fixed: a loco that isn't yours (a company loco, or one you spawned), picked

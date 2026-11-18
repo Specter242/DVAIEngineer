@@ -303,8 +303,7 @@ namespace AIEngineer.UI.Tablet
         }
 
         /// <summary>A loco, tender, or slug: what moves a train, not what it carries.</summary>
-        public static bool IsPower(TrainCar car) =>
-            car != null && (car.IsLoco || CarTypes.IsAnyLocomotiveOrTender(car.carLivery) || CarTypes.IsSlug(car.carLivery));
+        public static bool IsPower(TrainCar car) => Session.IsPower(car);
 
         /// <summary>A loco's own cars: the cars coupled to it, the loco and any tender not counted.</summary>
         public static int CarsOf(TrainCar loco)

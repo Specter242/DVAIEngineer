@@ -101,6 +101,16 @@ namespace AIEngineer.Game
 
         public string Name => Loco != null ? Loco.ID : "(gone)";
 
+        /// <summary>The engineer's last note, as told to the player (the note itself is cleared once told).</summary>
+        public string LastNote { get; private set; }
+
+        /// <summary>The engineer's last logged note, not told to the player.</summary>
+        public string LastLogged { get; private set; }
+
+        /// <summary>A loco, tender, or slug: what moves a train, not what it carries.</summary>
+        public static bool IsPower(TrainCar car) =>
+            car != null && (car.IsLoco || CarTypes.IsAnyLocomotiveOrTender(car.carLivery) || CarTypes.IsSlug(car.carLivery));
+
         /// <summary>
         /// Whether the engineer has nothing to do but hold the train:
         /// standing with no orders, or waiting on the player at a warehouse
@@ -384,9 +394,16 @@ namespace AIEngineer.Game
             LogWaits(state);
             if (Engineer.Note != null)
             {
+                LastNote = Engineer.Note;
                 Main.Notify($"AI engineer: {Name}: {Engineer.Note}.");
                 Main.Log($"{Name}: {Engineer.Note}");
                 Engineer.Note = null;
+            }
+            if (Engineer.LogNote != null)
+            {
+                LastLogged = Engineer.LogNote;
+                Main.Log($"{Name}: {Engineer.LogNote}");
+                Engineer.LogNote = null;
             }
             WatchForTrouble(state, now);
             WatchForStanding(now);
@@ -639,9 +656,12 @@ namespace AIEngineer.Game
             var length = 0.0;
             var mass = 0.0;
             var locoMass = 0.0;
+            var power = 0;
             foreach (var car in set.cars)
             {
                 length += car.InterCouplerDistance;
+                if (IsPower(car))
+                    power++;
                 if (car.derailed)
                     onTrack = false;
                 var m = car.massController != null ? car.massController.TotalMass : 0f;
@@ -659,10 +679,12 @@ namespace AIEngineer.Game
             state.SpeedTowardA = endA.isFrontCoupler ? v : -v;
             state.Length = length;
             state.CarCount = set.cars.Count;
+            state.PowerCars = power;
             state.LocoFront = front;
             // cars[0] is end A's car. As Cut reckons it, the far end is the one with more cars beyond the loco (A on a tie).
             var locoIndex = set.cars.IndexOf(Loco);
             state.LocoEnd = locoIndex < set.cars.Count - 1 - locoIndex ? ConsistEnd.A : ConsistEnd.B;
+            state.PowerAtFarEnd = IsPower(set.cars[state.LocoEnd == ConsistEnd.A ? set.cars.Count - 1 : 0]);
             state.Owner = set.id;
             state.OnTrack = onTrack;
             state.CanMove = Controls.EngineRunning;
@@ -682,10 +704,11 @@ namespace AIEngineer.Game
         /// <summary>
         /// The cars' air, for the engineer's check before it starts: the
         /// highest cylinder pressure and lowest pipe among the cars (gauge;
-        /// the game keeps them absolute), and their hand brakes. Locos are
-        /// left out of the pressures (their own brake holds the train while
-        /// it waits) but not of the hand brakes: this loco's too, which the
-        /// player may set after the engineer took over.
+        /// the game keeps them absolute), and their hand brakes. Power is
+        /// left out of the pressures (a loco's own brake holds the train while
+        /// it waits, and a tender's cylinder copies its loco's, so it would
+        /// read as a brake that never comes off) but not of the hand brakes:
+        /// this loco's too, which the player may set after the engineer took over.
         /// </summary>
         private void ReadAir(Trainset set, ref TrainState state)
         {
@@ -700,7 +723,7 @@ namespace AIEngineer.Game
                     continue;
                 if (brakes.hasHandbrake && brakes.handbrakePosition > 0.01f)
                     handbrakes++;
-                if (car.IsLoco || CarTypes.IsSlug(car.carLivery))
+                if (IsPower(car))
                     continue;
                 any = true;
                 cylinder = Math.Max(cylinder, brakes.brakeCylinderPressure - 1.0);

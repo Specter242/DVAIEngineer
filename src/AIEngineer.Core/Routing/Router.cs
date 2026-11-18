@@ -42,6 +42,21 @@ namespace AIEngineer.Core.Routing
         /// <summary>The cost of a reversal beyond the distance it adds, in meters of running.</summary>
         public double ReversalPenalty = 400;
 
+        /// <summary>
+        /// The end whose leading is shoving: a train's cars end, its loco at
+        /// the other. Null for none (running light, or a loco at each end).
+        /// </summary>
+        public ConsistEnd? ShovingEnd;
+
+        /// <summary>
+        /// The extra cost of each meter run with <see cref="ShovingEnd"/>
+        /// leading, a reversal's pull forward and way back included, so a
+        /// crew's way is cheapest: the loco leads on the road,
+        /// and a train turned or reversed near where it must arrive cars
+        /// first, not shoved its whole way.
+        /// </summary>
+        public double ShovingCost = 1;
+
         /// <summary>The cost of taking a switch's diverging branch (any branch but the first), in meters.</summary>
         public double DivergingPenalty = 10;
 
@@ -190,7 +205,7 @@ namespace AIEngineer.Core.Routing
             var runCache = new Dictionary<int, Run>();
             var runs = new RunSearch(request);
             var backOnto = new Run[2];
-            var pullsClear = new Dictionary<int, (Run Pull, List<RoutePiece> Back)>();
+            var pullsClear = new Dictionary<int, (Run Pull, List<RoutePiece> Back, double Room)>();
             var heap = new MinHeap();
             var goalTrack = request.Goal.Track;
             var goalStart = graph.EndPoint(goalTrack, TrackEnd.Start);
@@ -200,6 +215,8 @@ namespace AIEngineer.Core.Routing
             var blocked = request.Blocked;
             var goalAmongCars = blocked != null && blocked(goalTrack, request.Goal.Offset - 0.5, request.Goal.Offset + 0.5);
             bool ApproachBlocked(int track, double from) => blocked != null && !goalAmongCars && blocked(track, from, request.Goal.Offset);
+
+            double Shove(ConsistEnd leader, double meters) => request.ShovingEnd == leader ? meters * request.ShovingCost : 0;
 
             double Heuristic(int node)
             {
@@ -239,11 +256,11 @@ namespace AIEngineer.Core.Routing
                     && (Math.Abs(request.Goal.Offset - p.Offset) <= StartMargin || !ApproachBlocked(p.Track, ahead)))
                 {
                     var direct = Math.Abs(request.Goal.Offset - p.Offset);
-                    Relax(goalNode, direct, -1, StepKind.Start, end, default);
+                    Relax(goalNode, direct + Shove(end, direct), -1, StepKind.Start, end, default);
                 }
                 // The node for this start: the leading end at the exit of its track.
                 if (!barred)
-                    Relax(Node(p.Track, exit, end), toExit, -1, StepKind.Start, end, default);
+                    Relax(Node(p.Track, exit, end), toExit + Shove(end, toExit), -1, StepKind.Start, end, default);
             }
             if (!anyStart)
             {
@@ -271,7 +288,7 @@ namespace AIEngineer.Core.Routing
                     if (run != null)
                     {
                         backOnto[(int)other] = run;
-                        Relax(goalNode, back + run.Penalty, -1, StepKind.StartBack, other, default);
+                        Relax(goalNode, back + Shove(other, back) + run.Penalty, -1, StepKind.StartBack, other, default);
                     }
                 }
 
@@ -350,7 +367,7 @@ namespace AIEngineer.Core.Routing
                     var run = FindRunFrom(from, outward, pull, runs);
                     if (run == null)
                         continue;
-                    var cost = pull + room + request.ReversalPenalty + run.Penalty;
+                    var cost = pull + Shove(puller, pull) + room + Shove(puller.Other(), room) + request.ReversalPenalty + run.Penalty;
                     if (states.TryGetValue(node, out var existing) && existing.Cost <= cost)
                         continue;
                     // The tail's way back to the points: from a little beyond where it comes to rest
@@ -367,7 +384,7 @@ namespace AIEngineer.Core.Routing
                     back.Reverse();
                     for (var i = 0; i < back.Count; i++)
                         back[i] = back[i].Reversed();
-                    pullsClear[node] = (run, back);
+                    pullsClear[node] = (run, back, room);
                     Relax(node, cost, -1, StepKind.StartReverse, puller, default);
                 }
             }
@@ -404,10 +421,10 @@ namespace AIEngineer.Core.Routing
                     if (link.Track == goalTrack && (!request.GoalDirection.HasValue || request.GoalDirection.Value == inward)
                         && (!request.LastLeader.HasValue || request.LastLeader.Value == leader)
                         && !ApproachBlocked(link.Track, entry))
-                        Relax(goalNode, state.Cost + Math.Abs(request.Goal.Offset - entry) + penalty, node, StepKind.Traverse, default, link);
+                        Relax(goalNode, state.Cost + Math.Abs(request.Goal.Offset - entry) + Shove(leader, Math.Abs(request.Goal.Offset - entry)) + penalty, node, StepKind.Traverse, default, link);
 
                     if (blocked == null || !blocked(link.Track, 0, graph.Length(link.Track)))
-                        Relax(Node(link.Track, link.End.Other(), leader), state.Cost + graph.Length(link.Track) + penalty, node, StepKind.Traverse, default, link);
+                        Relax(Node(link.Track, link.End.Other(), leader), state.Cost + graph.Length(link.Track) + Shove(leader, graph.Length(link.Track)) + penalty, node, StepKind.Traverse, default, link);
 
                     if (!request.AllowReversals)
                         continue;
@@ -420,8 +437,9 @@ namespace AIEngineer.Core.Routing
                         runCache[runKey] = run = FindRun(link.Track, link.End, need, runs);
                     if (run == null)
                         continue;
-                    // The pull forward, and the tail's way back to the points it has just cleared.
-                    var cost = state.Cost + need + request.ReversalClearance + request.ReversalPenalty + penalty + run.Penalty;
+                    // The pull forward, this end leading, and the tail's way back to the points it has just cleared, the other.
+                    var cost = state.Cost + need + Shove(leader, need) + request.ReversalClearance + Shove(leader.Other(), request.ReversalClearance)
+                        + request.ReversalPenalty + penalty + run.Penalty;
                     if (states.TryGetValue(reverseNode, out existing) && existing.Cost <= cost)
                         continue;
                     reversalRuns[reverseNode] = run;
@@ -436,7 +454,9 @@ namespace AIEngineer.Core.Routing
             }
 
             failure = RouteFailure.None;
-            return Reconstruct(request, states, reversalRuns, backOnto, pullsClear, goalNode);
+            var found = Reconstruct(request, states, reversalRuns, backOnto, pullsClear, goalNode);
+            found.SearchCost = goalState.Cost;
+            return found;
         }
 
         private bool ValidPosition(TrackPosition p) =>
@@ -602,7 +622,7 @@ namespace AIEngineer.Core.Routing
         }
 
         private Route Reconstruct(RouteRequest request, Dictionary<int, NodeState> states, Dictionary<int, Run> runs, Run[] backOnto,
-            Dictionary<int, (Run Pull, List<RoutePiece> Back)> pullsClear, int goalNode)
+            Dictionary<int, (Run Pull, List<RoutePiece> Back, double Room)> pullsClear, int goalNode)
         {
             // Walk back from the goal to the start, then replay forward.
             var chain = new List<int>();
@@ -617,6 +637,7 @@ namespace AIEngineer.Core.Routing
             var pieces = new List<RoutePiece>();
             var switches = new List<SwitchSetting>();
             var distance = 0.0;
+            var overlap = 0.0;
 
             void AddPiece(RoutePiece p)
             {
@@ -648,7 +669,7 @@ namespace AIEngineer.Core.Routing
             {
                 // The leader pulls the train clear of the switch its tail stands across; the tail
                 // then leads the next leg from where it has come to rest, back to the points.
-                var (pull, back) = pullsClear[chain[0]];
+                var (pull, back, room) = pullsClear[chain[0]];
                 legs.Add(new RouteLeg(pull.Pieces, pull.Switches, leader, true));
                 leader = leader.Other();
                 foreach (var p in back)
@@ -668,6 +689,7 @@ namespace AIEngineer.Core.Routing
                     }
                     AddPiece(p);
                 }
+                overlap = Math.Max(0, distance - room);
                 if (pieces.Count == 0)
                 {
                     var points = graph.OffsetOf(TrackOf(chain[0]), EndOf(chain[0]));
@@ -711,7 +733,7 @@ namespace AIEngineer.Core.Routing
                     AddPiece(p);
                 if (pieces.Count == 0)
                     pieces.Add(new RoutePiece(link.Track, entry, entry));
-                legs.Add(new RouteLeg(pieces, switches, leader, true));
+                legs.Add(new RouteLeg(pieces, switches, leader, true, overlap));
 
                 leader = leader.Other();
                 pieces = new List<RoutePiece>();
@@ -723,6 +745,7 @@ namespace AIEngineer.Core.Routing
                 var runLength = 0.0;
                 foreach (var p in run.Pieces)
                     runLength += p.Length;
+                overlap = Math.Max(0, runLength - request.ReversalClearance);
                 for (var k = run.Pieces.Count - 1; k >= 0; k--)
                     AddPiece(run.Pieces[k].Reversed());
                 for (var k = run.Switches.Count - 1; k >= 0; k--)
@@ -731,7 +754,7 @@ namespace AIEngineer.Core.Routing
 
             if (pieces.Count == 0)
                 pieces.Add(new RoutePiece(request.Goal.Track, request.Goal.Offset, request.Goal.Offset));
-            legs.Add(new RouteLeg(pieces, switches, leader, false));
+            legs.Add(new RouteLeg(pieces, switches, leader, false, overlap));
             return new Route(legs);
         }
 

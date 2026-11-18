@@ -162,7 +162,7 @@ namespace AIEngineer.Core.Driving
             var meet = way.Count > 0 ? way[0] : new CutRef(i, e);
             var outer = cuts[meet.Cut].Ends[meet.End];
             // The loco beyond the outermost cut, with whatever else the train has (extra) between.
-            var locoLength = (now.CarCount <= 1 ? now.Length : 15) + extra;
+            var locoLength = (now.LightEngine ? now.Length : 15) + extra;
             var locoEnd = TrackWalker.Advance(world.Graph, outer.Position, outer.Outward, locoLength, lie, out var outward);
             var length = locoLength + cut.Length;
             foreach (var w in way)
@@ -194,7 +194,7 @@ namespace AIEngineer.Core.Driving
         /// <summary>The train as it is, with four cars more at its far end: as a later pull of a trip finds it.</summary>
         private static TrainState Loaded(IEngineerWorld world, Func<int, int> lie, TrainState now)
         {
-            var far = now.CarCount <= 1 ? ConsistEnd.B : now.LocoEnd.Other();
+            var far = now.LightEngine ? ConsistEnd.B : now.LocoEnd.Other();
             var at = far == ConsistEnd.A ? now.EndA : now.EndB;
             var outward = far == ConsistEnd.A ? now.OutwardA : now.OutwardB;
             var moved = TrackWalker.Advance(world.Graph, at, outward, LoadedExtra, lie, out var dir);
@@ -211,7 +211,8 @@ namespace AIEngineer.Core.Driving
             }
             loaded.Length += LoadedExtra;
             loaded.CarCount += 4;
-            if (now.CarCount <= 1)
+            loaded.PowerAtFarEnd = false;
+            if (now.LightEngine)
                 loaded.LocoEnd = ConsistEnd.A;
             return loaded;
         }

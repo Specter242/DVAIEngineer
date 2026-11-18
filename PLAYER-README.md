@@ -60,6 +60,11 @@ blower while it stands.
   - When an order needs the loco turned round, it runs round a wye or a
     loop. If there's none it can reach, it does the move anyway and tells
     you what it couldn't manage.
+  - On the road the loco leads: a train with its cars ahead turns on a wye
+    or loop within reach and runs loco first, backing in only where a track
+    needs the cars first. Picking up cars, a loco turns to face away from
+    them only if that's less than about 1 km out of its way; otherwise it
+    couples on facing them.
   - Under every page, the last order you gave, with **Undo**.
   - **With the Comms Tablet installed,** these pages are its **Engineers**
     app instead, on the Comms Tablet's home screen, and the engineer's
