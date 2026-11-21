@@ -21,9 +21,9 @@ namespace AIEngineer.UI.Tablet
     /// down the left, nine at a time; down the right, zoom, Map, the
     /// station's plate (▲ up from a yard), its yards' letters, Show, and the
     /// arrows. A press on a car, a loco, or a track picks it and brings its
-    /// orders up over the bottom of the map; a drag moves the page, never
-    /// off it. The page is drawn again when it, its view, or what is on it
-    /// changes, and twice a second at most while trains move.
+    /// orders up over the bottom of the map; the arrows and zoom move the
+    /// page, never off it. The page is drawn again when it, its view, or what
+    /// is on it changes, and twice a second at most while trains move.
     /// </summary>
     internal static class TabletMap
     {
@@ -82,6 +82,9 @@ namespace AIEngineer.UI.Tablet
         {
             public string Label;
             public Action Do;
+
+            /// <summary>Offered with no loco chosen: it isn't an order for one.</summary>
+            public bool Always;
         }
 
         /// <summary>The next time the map is drawn, it opens on the chosen loco's page.</summary>
@@ -99,11 +102,46 @@ namespace AIEngineer.UI.Tablet
             dirty = true;
         }
 
+        /// <summary>Releases cached render state and picks when the world unloads.</summary>
+        public static void ResetForUnload()
+        {
+            if (texture != null)
+            {
+                texture.Release();
+                UnityEngine.Object.Destroy(texture);
+                texture = null;
+            }
+            pick = null;
+            verbs.Clear();
+            cars.Clear();
+            spans.Clear();
+            after = false;
+            placed = false;
+            dirty = true;
+            at = PageRef.Route;
+            tabSet = 0;
+            shownAt = -1000;
+            nextRender = 0f;
+            bottomShown = default;
+            PressArea = default;
+            view = default;
+            fit = default;
+            content = default;
+        }
+
         /// <summary>The booklet's copies put away while no tablet shows the map (from the host's LateUpdate).</summary>
         public static void PutAwayIfUnseen()
         {
-            if (Time.unscaledTime - shownAt > 3f)
-                BookletRenderer.Hide();
+            if (Time.unscaledTime - shownAt <= 3f)
+                return;
+            BookletRenderer.Hide();
+            if (texture != null)
+            {
+                texture.Release();
+                UnityEngine.Object.Destroy(texture);
+                texture = null;
+                dirty = true;
+            }
         }
 
         private static float shownAt = -1000;
@@ -139,6 +177,19 @@ namespace AIEngineer.UI.Tablet
 #endif
 
 #if !PUBLIC_RELEASE
+        /// <summary>Picks a spot on a track, as a press on it does; returns the index of the order labeled so, or -1.</summary>
+        public static int PickTrackForTest(World world, TrackPosition at, string label)
+        {
+            try
+            {
+                PickTrack(world, at);
+            }
+            catch (TabletSurface.Redraw)
+            {
+            }
+            return verbs.FindIndex(v => v.Label == label);
+        }
+
         /// <summary>Presses one of the pick's orders, as on the panel.</summary>
         public static string DoForTest(int index)
         {
@@ -260,6 +311,11 @@ namespace AIEngineer.UI.Tablet
         {
             at = page;
             var p = PageOf(book);
+            if (p == null)
+            {
+                Unpick();
+                return;
+            }
             content = Padded(p.Box);
             fit = PageView.Fit(content, FitArea, MapW, MapH, 0, 0, 3);
             view = fit;
@@ -294,6 +350,12 @@ namespace AIEngineer.UI.Tablet
 
         // ---- Drawing the page into its texture (from LateUpdate) ----
 
+        // Cached overlay delegate and scratch refs so RenderIfNeeded allocates no closure on the main thread.
+        private static BookletPage overlayPage;
+        private static Network overlayNetwork;
+        private static Session overlayChosen;
+        private static readonly Action<Func<double, double, Vector2>> drawOverlay = px => Overlay(overlayPage, overlayNetwork, overlayChosen, px);
+
         /// <summary>Draws the page into the map's texture, if it changed or its time has come.</summary>
         public static void RenderIfNeeded()
         {
@@ -324,21 +386,34 @@ namespace AIEngineer.UI.Tablet
             }
             if (!dirty && Time.unscaledTime < nextRender)
                 return;
-            dirty = false;
             nextRender = Time.unscaledTime + RenderSeconds;
             var page = PageOf(book);
             if (page == null)
                 return;
             ReadCars(world, page);
-            var chosen = TabletUi.Chosen != null ? Host.SessionFor(TabletUi.Chosen, false) : null;
-            BookletRenderer.Render(page, view.CenterX, -view.CenterY, view.Scale, texture, px => Overlay(page, network, chosen, px));
+            overlayPage = page;
+            overlayNetwork = network;
+            overlayChosen = TabletUi.Chosen != null ? Host.SessionFor(TabletUi.Chosen, false) : null;
+            try
+            {
+                if (BookletRenderer.Render(page, view.CenterX, -view.CenterY, view.Scale, texture, drawOverlay))
+                    dirty = false;
+            }
+            finally
+            {
+                overlayPage = null;
+                overlayNetwork = null;
+                overlayChosen = null;
+            }
         }
 
         private static readonly Color RouteColor = new Color(1f, 0.74f, 0.1f, 0.95f);
+        private static readonly Color ConductorColor = new Color(0.25f, 0.8f, 0.72f, 0.95f);
         private static readonly Color PickColor = new Color(0.88f, 0.75f, 0.42f, 0.85f);
         private static readonly Color SetColor = new Color(0.12f, 0.58f, 0.22f, 0.95f);
         private static readonly Color LocoColor = Hex("efe6cf");
         private static readonly Color LocoEdge = Hex("1d160c");
+        private static readonly Color CarColor = Hex("8a8478");
         private static readonly Color CarEdge = new Color(0.08f, 0.07f, 0.06f, 0.9f);
 
         /// <summary>Every car the page draws a track of, and where on the page it stands.</summary>
@@ -385,7 +460,7 @@ namespace AIEngineer.UI.Tablet
                 // A car between jobs.
             }
             if (job == null)
-                return Hex("8a8478");
+                return CarColor;
             switch (job.jobType)
             {
                 case DV.ThingTypes.JobType.Transport:
@@ -398,7 +473,7 @@ namespace AIEngineer.UI.Tablet
                 case DV.ThingTypes.JobType.ShuntingUnload:
                     return ShuntUnload;
                 default:
-                    return Hex("8a8478");
+                    return CarColor;
             }
         }
 
@@ -437,6 +512,15 @@ namespace AIEngineer.UI.Tablet
                     foreach (var piece in route.Legs[l].Pieces)
                         foreach (var (run, a, b) in page.Stretch(piece.Track, piece.From, piece.To))
                             Along(run, a, b, 6 * k, RouteColor);
+            }
+            // The conductor's route, whichever loco is chosen: it is the player's own train's.
+            var conductor = ConductorDesk.Current?.Conductor;
+            if (conductor?.Route != null)
+            {
+                for (var l = Math.Max(0, conductor.LegIndex); l < conductor.Route.Legs.Count; l++)
+                    foreach (var piece in conductor.Route.Legs[l].Pieces)
+                        foreach (var (run, a, b) in page.Stretch(piece.Track, piece.From, piece.To))
+                            Along(run, a, b, 6 * k, ConductorColor);
             }
             // Each switch's setting: a bar along the leg it is set to.
             var switches = page.Schematic.Switches;
@@ -651,7 +735,7 @@ namespace AIEngineer.UI.Tablet
                 Changed();
         }
 
-        // ---- Presses and drags on the map ----
+        // ---- Presses on the map ----
 
         /// <summary>The part of the map no plate is over (canvas pixels), where a press picks on the map; empty off the map page.</summary>
         public static Rect PressArea { get; private set; }
@@ -771,9 +855,21 @@ namespace AIEngineer.UI.Tablet
             var n = TabletUi.CarsOf(TabletUi.Chosen);
             if (n > 0)
                 list.Add(new Verb { Label = $"Leave my {Plural(n, "car")} here", Do = () => TabletUi.Order($"Leave {Plural(n, "car")} on {name}", after, s => Give(s, new Waypoint(p, WaypointAction.Uncouple) { CarCount = n, Label = name })) });
+            if (ConductorDesk.CanPlan)
+                list.Add(new Verb { Label = "Conductor", Always = true, Do = () => PlanConductor(world, named, p, name) });
             var room = named != null ? $", {named.Length:F0} m{(named.DeadEnd ? ", stub" : "")}" : "";
             Set(new Pick { Kind = PickKind.Track, At = p, Name = $"<b>{name}</b>{room}" }, list);
             Changed();
+        }
+
+        /// <summary>Has the conductor plan the player's train's route here, and shows it: a named track whole, else this spot.</summary>
+        private static void PlanConductor(World world, NamedTrack named, TrackPosition p, string name)
+        {
+            var why = named != null
+                ? ConductorDesk.Plan(state => OrderGoals.ToTrack(world.Graph, named.Track, state.Length, named.Id, Arrival.CarsFirstIntoDeadEnd), true)
+                : ConductorDesk.Plan(state => new Waypoint(p) { Label = name }, false);
+            TabletUi.Said(why ?? $"Conductor: route to {name} ready for your word");
+            TabletUi.Go(TabletTab.Conductor);
         }
 
         private static void Give(Session s, Waypoint wp)
@@ -949,7 +1045,7 @@ namespace AIEngineer.UI.Tablet
             {
                 var v = verbs[i];
                 var cell = new Rect(r.x + 10 + (i % 6) * (w + 8), r.y + 8 + 60 + 6 + (i / 6) * 88, w, 80);
-                if (Button(cell, v.Label, TabletSkin.Verb, TabletUi.Chosen != null || forLoco))
+                if (Button(cell, v.Label, TabletSkin.Verb, TabletUi.Chosen != null || forLoco || v.Always))
                 {
                     v.Do();
                     Unpick();

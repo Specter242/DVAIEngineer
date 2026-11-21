@@ -1,7 +1,12 @@
 using System;
+using System.Text;
 using AIEngineer.Core.Driving;
+using DV.CabControls.Spec;
 using DV.Simulation.Cars;
 using DV.Simulation.Controllers;
+using DV.Simulation.Ports;
+using HarmonyLib;
+using LocoSim.Implementations;
 using UnityEngine;
 
 namespace AIEngineer.Game
@@ -38,18 +43,94 @@ namespace AIEngineer.Game
             control != null && !float.IsNaN(seen)
             && Mathf.Abs(control.Value - seen) > (now < settleUntil ? MovedWhileSettling : Moved);
 
+        /// <summary>The engineer's setting and where the control stands now, for the log.</summary>
+        public string Movement => control == null ? "" : $"{(float.IsNaN(seen) ? "-" : seen.ToString("F2"))} to {control.Value:F2}";
+
+        // ---- The cab's own lever ----
+        // The game loads a cab's levers only when the player steps into it, and a lever there may
+        // move as it loads: Realistic Brakes' S-6 independent springs out of release to running
+        // and out of quick application to slow application (Aro1225 and Ender, 2026-11-19).
+
+        // The positions the cab's lever stays at, let go: its sprung notches' inner limits.
+        private float springLo;
+        private float springHi = 1f;
+        // The cab lever's notches (0: smooth, or no cab loaded).
+        private int cabNotches;
+        // Until then, any change is the cab settling, not the player's hand.
+        private float cabSettleUntil = float.NegativeInfinity;
+        // Asked for this, the lever settled there: not asked again while it stands there.
+        private float landedAsk = float.NaN;
+        private float landedAt = float.NaN;
+
+        /// <summary>The cab just loaded: until <paramref name="until"/> a change is the cab settling.</summary>
+        public void CabLoaded(float until) => cabSettleUntil = until;
+
+        /// <summary>What the cab's lever is: its notches, and the inner limits its spring holds it within (0 and 1 for none).</summary>
+        public void CabLever(int notches, float lo, float hi)
+        {
+            cabNotches = notches;
+            springLo = lo;
+            springHi = hi;
+        }
+
+        /// <summary>No cab loaded: no spring, no notches but the control's own.</summary>
+        public void CabGone()
+        {
+            CabLever(0, 0f, 1f);
+            landedAsk = landedAt = float.NaN;
+        }
+
+        /// <summary>
+        /// A change that isn't the player's: the cab settling as it loads,
+        /// or the lever, just set, springing onto one of its notches. Taken
+        /// as the engineer's own; says what moved, or null.
+        /// </summary>
+        public string Settle(float now)
+        {
+            if (control == null || float.IsNaN(seen))
+                return null;
+            var value = control.Value;
+            if (Mathf.Abs(value - seen) <= Deadband)
+                return null;
+            var cabSettling = now < cabSettleUntil;
+            var onNotch = cabNotches > 1 && Mathf.Abs(value * (cabNotches - 1) - Mathf.Round(value * (cabNotches - 1))) < 0.02f;
+            if (!cabSettling && !(now < settleUntil && onNotch))
+                return null;
+            var said = $"{seen:F2} to {value:F2}";
+            landedAsk = lastAsk;
+            landedAt = value;
+            seen = value;
+            return said;
+        }
+
+        // What the engineer last asked for.
+        private float lastAsk = float.NaN;
+
         public void Set(float want, float now)
         {
             if (control == null)
                 return;
             want = Mathf.Clamp01(want);
+            // A sprung lever stays only within its spring's limits: asked beyond, it springs back
+            // (and the engineer would take that for the player's hand).
+            want = Mathf.Clamp(want, springLo, springHi);
+            var askedBefore = lastAsk;
+            lastAsk = want;
+            // Asked for this before, the lever settled beside it, and stands there still: leave it.
+            if (Mathf.Abs(want - landedAsk) < 0.001f && Mathf.Abs(control.Value - landedAt) <= Deadband)
+            {
+                seen = control.Value;
+                return;
+            }
             // A notched lever settles on a notch: ask for one, or it snaps back
             // and the engineer would set it again every tick (and take the snap
             // for the player's hand).
             if (control.IsNotched && control.NotchCount >= 1f)
                 want = Mathf.Round(want * control.NotchCount) / control.NotchCount;
             var value = control.Value;
-            if (Mathf.Abs(value - want) > Deadband)
+            // Closing a control it had opened, it is closed whatever it reads: a throttle held at
+            // idle (Realistic Brakes' traction cut) comes back only once the driver has closed it.
+            if (Mathf.Abs(value - want) > Deadband || (want <= Deadband && askedBefore > Deadband))
             {
                 control.Set(want);
                 settleUntil = now + SettleTime;
@@ -69,7 +150,14 @@ namespace AIEngineer.Game
         }
 
         /// <summary>Forget what it set, so the player's control isn't mistaken later.</summary>
-        public void Release() => seen = float.NaN;
+        public void Release()
+        {
+            seen = float.NaN;
+            lastAsk = float.NaN;
+            landedAsk = float.NaN;
+            landedAt = float.NaN;
+            settleUntil = 0f;
+        }
     }
 
     /// <summary>
@@ -96,6 +184,14 @@ namespace AIEngineer.Game
         /// <summary>Seconds the throttle stays at or under where something else eased it to.</summary>
         private const float EasedHold = 4f;
 
+        // Power asked and the throttle reading idle since then; after this long it is closed, and
+        // opened again from idle no faster than this a second.
+        private const float HeldAtIdle = 1f;
+        private const float HeldReopenRate = 0.06f;
+        private float heldAtIdleSince = float.NaN;
+        private float heldCeiling = 1f;
+        private float lastApply = float.NaN;
+
         /// <summary>A steam loco: the reverser is its cutoff, notched up as it gathers speed.</summary>
         public bool Steam { get; set; }
 
@@ -109,9 +205,135 @@ namespace AIEngineer.Game
             dynamicBrake = new ControlHand(overrider?.DynamicBrake);
             reverser = new ControlHand(overrider?.Reverser);
             sander = overrider?.Sander;
+            hands = new[]
+            {
+                ("throttle", throttle, (OverridableBaseControl)overrider?.Throttle),
+                ("reverser", reverser, (OverridableBaseControl)overrider?.Reverser),
+                ("train brake", trainBrake, (OverridableBaseControl)overrider?.Brake),
+                ("loco brake", locoBrake, (OverridableBaseControl)overrider?.IndependentBrake),
+                ("dynamic brake", dynamicBrake, (OverridableBaseControl)overrider?.DynamicBrake),
+            };
         }
 
         public bool Usable => overrider != null && throttle.Present && reverser.Present && (trainBrake.Present || locoBrake.Present);
+
+        // ---- The cab ----
+
+        /// <summary>Seconds after the cab loads in which a lever's change is the cab settling.</summary>
+        private const float CabSettle = 2f;
+
+        /// <summary>Minimum spacing between cab lever scans while the cab settles.</summary>
+        private const float CabLeverScanInterval = 0.5f;
+
+        private static readonly AccessTools.FieldRef<InteractablePortFeeder, Port> FeederPort = AccessTools.FieldRefAccess<InteractablePortFeeder, Port>("port");
+        private static readonly AccessTools.FieldRef<OverridableBaseControl, Port> ControlPort = AccessTools.FieldRefAccess<OverridableBaseControl, Port>("controlPort");
+
+        private bool cabWas;
+        private float cabSettleUntil = float.NegativeInfinity;
+        private GameObject readInterior;
+        private bool cabLeverFinalRead;
+        private float nextCabLeverRead = float.NegativeInfinity;
+
+        private (string Name, ControlHand Hand, OverridableBaseControl Control)[] hands;
+
+        /// <summary>
+        /// Watches the loco's cab load and unload (the player stepping in
+        /// and out), reads its levers' springs, and takes a lever's change
+        /// as the cab settling rather than the player's hand. Called before
+        /// <see cref="MovedByAnother"/>; says what settled, or null.
+        /// </summary>
+        public string WatchCab(float now)
+        {
+            var cab = loco != null && loco.IsInteriorLoaded;
+            if (cab != cabWas)
+            {
+                cabWas = cab;
+                if (cab)
+                {
+                    cabSettleUntil = now + CabSettle;
+                    cabLeverFinalRead = false;
+                    nextCabLeverRead = float.NegativeInfinity;
+                }
+                foreach (var h in hands)
+                {
+                    if (cab)
+                        h.Hand.CabLoaded(cabSettleUntil);
+                    else
+                        h.Hand.CabGone();
+                }
+            }
+            // Its levers are fitted over a frame or two (another mod's too): scan at 0.5 s
+            // intervals across the settle window, plus one final scan once it ends.
+            var interior = cab ? loco.loadedInterior : null;
+            if (!ReferenceEquals(interior, readInterior))
+            {
+                readInterior = interior;
+                cabLeverFinalRead = false;
+                nextCabLeverRead = float.NegativeInfinity;
+            }
+            if (interior != null && !cabLeverFinalRead)
+            {
+                var windowEnd = cabSettleUntil + 0.5f;
+                if (now >= windowEnd)
+                {
+                    ReadCabLevers(interior);
+                    cabLeverFinalRead = true;
+                }
+                else if (now >= nextCabLeverRead)
+                {
+                    ReadCabLevers(interior);
+                    nextCabLeverRead = now + CabLeverScanInterval;
+                }
+            }
+            StringBuilder said = null;
+            foreach (var h in hands)
+            {
+                var moved = h.Hand.Settle(now);
+                if (moved == null)
+                    continue;
+                said = said == null ? new StringBuilder() : said.Append(", ");
+                said.Append(h.Name).Append(' ').Append(moved);
+            }
+            return said?.ToString();
+        }
+
+        private void ReadCabLevers(GameObject interior)
+        {
+            if (interior == null)
+                return;
+            foreach (var feeder in interior.GetComponentsInChildren<InteractablePortFeeder>(true))
+            {
+                var port = FeederPort(feeder);
+                if (port == null)
+                    continue;
+                foreach (var h in hands)
+                {
+                    if (h.Control == null || !ReferenceEquals(ControlPort(h.Control), port))
+                        continue;
+                    var lever = feeder.GetComponent<Lever>();
+                    if (lever == null || !lever.useSteppedJoint || lever.notches < 2)
+                    {
+                        h.Hand.CabLever(0, 0f, 1f);
+                        continue;
+                    }
+                    var span = lever.notches - 1f;
+                    var lo = lever.useInnerLimitSpring ? Mathf.Clamp01(lever.innerLimitMinNotch / span) : 0f;
+                    var hi = lever.useInnerLimitSpring ? Mathf.Clamp01(lever.innerLimitMaxNotch / span) : 1f;
+                    if (lever.useInnerLimitSpring && lever.invertDirection)
+                        (lo, hi) = (1f - hi, 1f - lo);
+                    h.Hand.CabLever(lever.notches, Mathf.Min(lo, hi), Mathf.Max(lo, hi));
+                }
+            }
+        }
+
+        /// <summary>The control <see cref="MovedByAnother"/> named, as the engineer left it and as it stands.</summary>
+        public string Movement(string name)
+        {
+            foreach (var h in hands)
+                if (h.Name == name)
+                    return h.Hand.Movement;
+            return "";
+        }
 
         public bool HasDynamicBrake => dynamicBrake.Present;
 
@@ -133,6 +355,7 @@ namespace AIEngineer.Game
 
         /// <summary>The throttle (a steam loco's regulator), 0 to 1.</summary>
         public float Throttle => throttle.Value;
+        public bool Sanding => sander != null && sander.Value > 0.5f;
 
         /// <summary>The control someone or something else has moved since the engineer set it, as the player reads it; null if none.</summary>
         public string MovedByAnother(float now) =>
@@ -174,6 +397,11 @@ namespace AIEngineer.Game
                 }
                 cutoutBefore = null;
             }
+            throttleCeiling = 1f;
+            ceilingUntil = float.NegativeInfinity;
+            heldAtIdleSince = float.NaN;
+            heldCeiling = 1f;
+            lastApply = float.NaN;
             throttle.Release();
             trainBrake.Release();
             locoBrake.Release();
@@ -303,6 +531,33 @@ namespace AIEngineer.Game
             var power = (float)output.Throttle;
             if (now < ceilingUntil)
                 power = Mathf.Min(power, throttleCeiling);
+            // Power asked and the throttle held at idle a while: close it once, as a driver resets
+            // a power cut (Realistic Brakes cuts a diesel's power while the brake pipe is low, and
+            // gives it back only once the pipe has recharged and the throttle is closed; the engineer
+            // opening it at 4.2 bar, before the cut's 4.5, stood at full throttle and 0 kN, 2026-11-19).
+            // Then it opens again from idle at a notch's pace: the engineer's own throttle wound up
+            // while it was held, and taken at once the current blew the motors' fuse at a stand
+            // (a DE2 under Realistic Brakes, 0.83 from idle, 2026-11-20).
+            var since = float.IsNaN(lastApply) ? 0f : Mathf.Max(0f, now - lastApply);
+            lastApply = now;
+            if (power > 0.05f && throttle.Value < 0.001f)
+            {
+                if (float.IsNaN(heldAtIdleSince))
+                    heldAtIdleSince = now;
+                else if (now - heldAtIdleSince > HeldAtIdle)
+                {
+                    heldAtIdleSince = now;
+                    heldCeiling = 0f;
+                    Main.Log($"{loco.ID}: the throttle stays at idle with power asked (a power cut?); closing it to reset");
+                }
+            }
+            else
+                heldAtIdleSince = float.NaN;
+            if (heldCeiling < 1f)
+            {
+                power = Mathf.Min(power, heldCeiling);
+                heldCeiling = Mathf.Min(1f, heldCeiling + HeldReopenRate * since);
+            }
             throttle.Set(power, now);
             if (sander != null)
             {

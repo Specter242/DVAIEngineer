@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace AIEngineer.Core.Booklet
@@ -31,9 +32,9 @@ namespace AIEngineer.Core.Booklet
             if (string.IsNullOrEmpty(name))
                 return false;
             var m = Pattern.Match(name);
-            if (!m.Success)
+            if (!m.Success || !int.TryParse(m.Groups[3].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number))
                 return false;
-            parsed = new YardTrackName(m.Groups[1].Value, m.Groups[2].Value, int.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture), m.Groups[4].Value);
+            parsed = new YardTrackName(m.Groups[1].Value, m.Groups[2].Value, number, m.Groups[4].Value);
             return true;
         }
 

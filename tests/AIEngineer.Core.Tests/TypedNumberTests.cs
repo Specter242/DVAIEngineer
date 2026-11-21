@@ -2,7 +2,7 @@ using AIEngineer.Core.Settings;
 
 namespace AIEngineer.Core.Tests;
 
- public class TypedNumberTests
+public class TypedNumberTests
 {
     [Theory]
     [InlineData("1.5", 1.5f)]

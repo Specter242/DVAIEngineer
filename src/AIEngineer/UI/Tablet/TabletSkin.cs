@@ -33,7 +33,7 @@ namespace AIEngineer.UI.Tablet
         }
     }
 
- internal static class TabletSkin
+    internal static class TabletSkin
     {
         public const float W = 1080, H = 924;
 

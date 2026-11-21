@@ -14,13 +14,25 @@
 # Building a zip publishes nothing.
 set -euo pipefail
 
+for cmd in dotnet mono python3 zip unzip sha256sum strings flock; do
+    command -v "$cmd" >/dev/null || { echo "$cmd is required" >&2; exit 1; }
+done
+
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dv="${DV_INSTALL_DIR:-$HOME/.local/share/Steam/steamapps/common/Derail Valley}"
 out="$repo/src/AIEngineer/bin/Release/net48"
 version="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["Version"])' "$repo/src/AIEngineer/Info.json")"
 zipfile="$repo/dist/AIEngineer-$version.zip"
 manifest="$zipfile.json"
-cap=(systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0)
+cap=()
+if command -v systemd-run >/dev/null && systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 true 2>/dev/null; then
+    cap=(systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0)
+fi
+
+if [[ -z "${AIE_PACKAGE_LOCKED:-}" ]]; then
+    mkdir -p "$repo/dist"
+    exec env AIE_PACKAGE_LOCKED=1 flock -o "$repo/dist/.package.lock" bash "$repo/scripts/package.sh" "$@"
+fi
 
 echo "Packaging AI Engineer $version"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -41,12 +53,20 @@ fi
 commit="$(git -C "$repo" rev-parse HEAD)"
 branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
 
-"${cap[@]}" dotnet test "$repo/tests/AIEngineer.Core.Tests/AIEngineer.Core.Tests.csproj" -c Release -nologo -v quiet
+"${cap[@]+"${cap[@]}"}" dotnet test "$repo/tests/AIEngineer.Core.Tests/AIEngineer.Core.Tests.csproj" -c Release -nologo -v quiet
+for loc in de_DE.UTF-8 tr_TR.UTF-8; do
+    env -u DOTNET_SYSTEM_GLOBALIZATION_INVARIANT LC_ALL="$loc" "${cap[@]+"${cap[@]}"}" dotnet test "$repo/tests/AIEngineer.Core.Tests/AIEngineer.Core.Tests.csproj" -c Release --no-build -nologo -v quiet
+done
 DV_INSTALL_DIR="$dv" PUBLIC_RELEASE=1 "$repo/scripts/check-adapter.sh" | grep -E "^(FAIL|skip)|adapter checks"
 
 # Last, so the mod's build is this one, whatever the adapter check built before.
-if ! build="$("${cap[@]}" dotnet build "$repo/src/AIEngineer/AIEngineer.csproj" -c Release -p:DvInstallDir="$dv" -p:PublicRelease=true --no-incremental -nologo 2>&1)"; then
-    grep -E "error" <<<"$build" | sort -u >&2
+if ! build="$("${cap[@]+"${cap[@]}"}" dotnet build "$repo/src/AIEngineer/AIEngineer.csproj" -c Release -p:DvInstallDir="$dv" -p:PublicRelease=true --no-incremental -nologo 2>&1)"; then
+    errors="$(grep -E "error" <<<"$build" | sort -u || true)"
+    if [[ -n "$errors" ]]; then
+        printf '%s\n' "$errors" >&2
+    else
+        printf '%s\n' "$build" >&2
+    fi
     exit 1
 fi
 if grep -q -E "warning CS" <<<"$build"; then
@@ -59,8 +79,24 @@ if [[ "$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["Ve
     exit 1
 fi
 
-stage="$repo/dist/stage"
-rm -rf "${stage:?}" "${zipfile:?}" "${manifest:?}"
+tmp="$(mktemp -d "$repo/dist/.package.XXXXXX")"
+backup_zip=""
+zip_installed=0
+published=0
+cleanup() {
+    if (( !published && zip_installed )); then
+        if [[ -n "$backup_zip" && -f "$backup_zip" ]]; then
+            mv -f "$backup_zip" "$zipfile" 2>/dev/null || true
+        else
+            rm -f "$zipfile" 2>/dev/null || true
+        fi
+    fi
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+stage="$tmp/stage"
+tmp_zip="$tmp/$(basename "$zipfile")"
+tmp_manifest="$tmp/$(basename "$manifest")"
 mkdir -p "$stage/AIEngineer"
 cp "$out/Info.json" "$out/AIEngineer.dll" "$out/AIEngineer.Core.dll" "$stage/AIEngineer/"
 cp "$repo/PLAYER-README.md" "$stage/AIEngineer/README.md"
@@ -76,12 +112,41 @@ if [[ "$actual" != "$expected" ]]; then
     exit 1
 fi
 
-mkdir -p "$repo/dist"
-(cd "$stage" && zip -q -r -X "$zipfile" AIEngineer)
-rm -rf "${stage:?}"
-sum="$(sha256sum "$zipfile" | cut -d' ' -f1)"
-printf '{\n  "id": "AIEngineer",\n  "version": "%s",\n  "commit": "%s",\n  "branch": "%s",\n  "file": "%s",\n  "bytes": %s,\n  "sha256": "%s",\n  "built": "%s"\n}\n' \
-    "$version" "$commit" "$branch" "$(basename "$zipfile")" "$(stat -c %s "$zipfile")" "$sum" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$manifest"
+(cd "$stage" && zip -q -r -X "$tmp_zip" AIEngineer)
+unzip -tqq "$tmp_zip"
+sum="$(sha256sum "$tmp_zip" | cut -d' ' -f1)"
+bytes="$(stat -c %s "$tmp_zip")"
+built="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 -I - "$tmp_manifest" "$version" "$commit" "$branch" "$(basename "$zipfile")" "$bytes" "$sum" "$built" <<'PY'
+import json
+import sys
+
+path, version, commit, branch, filename, size, sha, built = sys.argv[1:]
+data = {
+    "id": "AIEngineer",
+    "version": version,
+    "commit": commit,
+    "branch": branch,
+    "file": filename,
+    "bytes": int(size),
+    "sha256": sha,
+    "built": built,
+}
+text = json.dumps(data, indent=2) + "\n"
+if json.loads(text) != data:
+    raise SystemExit("Manifest JSON round-trip mismatch")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
+
+if [[ -f "$zipfile" ]]; then
+    backup_zip="$tmp/prev.zip"
+    ln "$zipfile" "$backup_zip"
+fi
+mv -f "$tmp_zip" "$zipfile"
+zip_installed=1
+mv -f "$tmp_manifest" "$manifest"
+published=1
 unzip -l "$zipfile"
 echo "Built $zipfile from $commit ($branch)"
 (cd "$(dirname "$zipfile")" && sha256sum "$(basename "$zipfile")")

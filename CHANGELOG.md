@@ -1,5 +1,43 @@
 # AI Engineer: changelog
 
+## 0.16.0 (2026-11-21)
+
+- New: the conductor, for the train you drive yourself. Aboard it, press a
+  track on the map and choose Conductor: route here. The Conductor tab shows
+  the route, and nothing changes until you press Execute. Then you drive
+  while the conductor lines the switches ahead and tells you where to stop
+  and reverse. It never touches the controls, and leaves any switch you
+  throw as you set it. Stand down ends it.
+- You can fire a steam loco while the engineer drives: Fire: You on its card
+  on the Engineers page. The engineer leaves the fire and the water to you,
+  tells you when the fire goes out or steam or water runs low, and waits for
+  steam if it runs out. A setting chooses what new engineers start with.
+- Gentler on the throttle: it opens about a notch at a time, eases off as
+  the traction motors heat up, and feels its way back up after a wheel slip.
+  It uses less sand on dry rail.
+- If the traction motor fuse is off, it holds the train and tells you. Turn
+  the fuse back on in the cab and it carries on.
+- Starting uphill, it takes up power against the brakes before letting them
+  off, so the train doesn't roll back.
+- When it can't get a train moving, or keep it moving, it tells you which
+  loco and why, drops its orders, and holds the train on its brakes. Give it
+  another order to try again.
+- With cars behind it, it slows and stops on the train brake and keeps the
+  independent light, putting it on fully only to hold the train once it has
+  stopped.
+- Setting out cars on a track that already has some, it couples to them and
+  shoves them in when that's much shorter than going round.
+- The Engineers page lists the loco you're on and those coupled to it, with
+  a button to give it orders.
+- With no steam at all, it stops and waits on any kind of move.
+- Fixed: with Realistic Brakes, stepping into the cab of a steam loco the
+  engineer was driving handed you the controls. When you do take a lever,
+  the message now says which one.
+- Fixed: with Realistic Brakes, a diesel could stand at full throttle with
+  no power, or blow its traction motor fuse when the power came back.
+- Performance improvements and bug fixes.
+- The Comms Tablet's Engineers app has these too.
+
 ## 0.15.3 (2026-11-18)
 
 - Your engineer keeps the loco in front on the road. A train with its cars

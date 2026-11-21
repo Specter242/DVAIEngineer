@@ -7,13 +7,19 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dv="${DV_INSTALL_DIR:-$HOME/.local/share/Steam/steamapps/common/Derail Valley}"
 project="$repo/tools/AIEngineer.AdapterCheck"
 
+command -v dotnet >/dev/null || { echo "dotnet is required" >&2; exit 1; }
 command -v mono >/dev/null || { echo "mono is required" >&2; exit 1; }
 # PUBLIC_RELEASE=1 checks the public release's build (scripts/package.sh), whose
 # developer settings, test hooks, and self-test must be gone.
 mode=()
 [[ "${PUBLIC_RELEASE:-}" == 1 ]] && mode=(-p:PublicRelease=true)
 if ! build="$(dotnet build "$project/AIEngineer.AdapterCheck.csproj" -c Release -p:DvInstallDir="$dv" "${mode[@]}" --no-incremental -nologo 2>&1)"; then
-    grep -E "error" <<<"$build" | sort -u >&2
+    errors="$(grep -E "error" <<<"$build" | sort -u || true)"
+    if [[ -n "$errors" ]]; then
+        printf '%s\n' "$errors" >&2
+    else
+        printf '%s\n' "$build" >&2
+    fi
     echo "adapter check build failed" >&2
     exit 1
 fi

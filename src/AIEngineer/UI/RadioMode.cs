@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace AIEngineer.UI
 {
- internal static class Radio
+    internal static class Radio
     {
         private static readonly FieldInfo AllModes = AccessTools.Field(typeof(CommsRadioController), "allModes");
 
@@ -84,7 +84,13 @@ namespace AIEngineer.UI
         private Order order;
         private TrainCar pointedCar;
         private TrackPosition? pointedTrack;
-        private string shown;
+        private bool shownValid;
+        private bool shownHasSession;
+        private TrainCar shownLoco;
+        private string shownLocoId;
+        private Order shownOrder;
+        private int shownTrack = -1;
+        private string shownStatus;
         private float nextRefresh;
 
         public EngineerRadioMode(CommsRadioController controller) => this.controller = controller;
@@ -94,23 +100,47 @@ namespace AIEngineer.UI
 
         private CommsRadioDisplay Display => controller.deleteControl != null ? controller.deleteControl.display : null;
 
+        private void InvalidateDisplay()
+        {
+            shownValid = false;
+            shownLoco = null;
+            shownLocoId = null;
+            shownTrack = -1;
+            shownStatus = null;
+        }
+
         public void Enable()
         {
+            if (session != null && (session.Loco == null || !IsLiveSession(session)))
+                session = null;
         }
 
         public void Disable()
         {
             pointedCar = null;
             pointedTrack = null;
-            shown = null;
+            InvalidateDisplay();
         }
 
         public void OverrideSignalOrigin(Transform origin) => signalOrigin = origin;
 
         public void SetStartingDisplay()
         {
-            shown = null;
+            if (session != null && (session.Loco == null || !IsLiveSession(session)))
+                session = null;
+            InvalidateDisplay();
             Display?.SetDisplay("AI ENGINEER", session == null ? "POINT AT A LOCO" : Describe(), "");
+        }
+
+        private static bool IsLiveSession(Session candidate)
+        {
+            var sessions = Host.Sessions;
+            for (var i = 0; i < sessions.Count; i++)
+            {
+                if (ReferenceEquals(sessions[i], candidate))
+                    return true;
+            }
+            return false;
         }
 
         public Color GetLaserBeamColor() => session == null ? PickLaser : TrackLaser;
@@ -118,14 +148,14 @@ namespace AIEngineer.UI
         public bool ButtonACustomAction()
         {
             order = (Order)(((int)order + OrderCount - 1) % OrderCount);
-            shown = null;
+            InvalidateDisplay();
             return true;
         }
 
         public bool ButtonBCustomAction()
         {
             order = (Order)(((int)order + 1) % OrderCount);
-            shown = null;
+            InvalidateDisplay();
             return true;
         }
 
@@ -133,7 +163,7 @@ namespace AIEngineer.UI
         {
             try
             {
-                if (session == null || session.Loco == null)
+                if (session == null || session.Loco == null || !IsLiveSession(session))
                 {
                     session = null;
                     var loco = Host.LocoOf(pointedCar);
@@ -141,14 +171,14 @@ namespace AIEngineer.UI
                         return;
                     session = Host.SessionFor(loco, true);
                     order = Order.Go;
-                    shown = null;
+                    InvalidateDisplay();
                     return;
                 }
                 switch (order)
                 {
                     case Order.Back:
                         session = null;
-                        shown = null;
+                        InvalidateDisplay();
                         return;
                     case Order.StopEngineer:
                         session.Stop(secure: true);
@@ -188,19 +218,21 @@ namespace AIEngineer.UI
                 if (origin == null || Time.unscaledTime < nextRefresh)
                     return;
                 nextRefresh = Time.unscaledTime + 0.1f;
-                if (session != null && session.Loco == null)
+                if (session != null && (session.Loco == null || !IsLiveSession(session)))
                     session = null;
 
-                string text;
-                string action;
-                if (session == null)
+                var hasSession = session != null;
+                TrainCar loco;
+                int track;
+                string status;
+                if (!hasSession)
                 {
                     pointedCar = Physics.Raycast(origin.position, origin.forward, out var hit, 100f, carMask)
                         ? TrainCar.Resolve(hit.transform.root)
                         : null;
-                    var loco = Host.LocoOf(pointedCar);
-                    text = loco == null ? "POINT AT A LOCO" : loco.ID;
-                    action = loco == null ? "" : "CLICK: TAKE IT";
+                    loco = Host.LocoOf(pointedCar);
+                    track = -1;
+                    status = null;
                 }
                 else
                 {
@@ -212,19 +244,42 @@ namespace AIEngineer.UI
                         if (network.TryFindNearest(new Vector2(abs.x, abs.z), 4f, out var p, out _))
                             pointedTrack = p;
                     }
+                    loco = session.Loco;
+                    track = pointedTrack.HasValue ? pointedTrack.Value.Track : -1;
+                    status = session.Engineer.Status;
+                }
+                var locoId = loco != null ? loco.ID : null;
+                if (shownValid && hasSession == shownHasSession && ReferenceEquals(loco, shownLoco)
+                    && string.Equals(locoId, shownLocoId, StringComparison.Ordinal)
+                    && (!hasSession || (order == shownOrder && track == shownTrack && string.Equals(status, shownStatus, StringComparison.Ordinal))))
+                    return;
+                shownValid = true;
+                shownHasSession = hasSession;
+                shownLoco = loco;
+                shownLocoId = locoId;
+                shownOrder = order;
+                shownTrack = track;
+                shownStatus = status;
+
+                string text;
+                string action;
+                if (!hasSession)
+                {
+                    text = loco == null ? "POINT AT A LOCO" : loco.ID;
+                    action = loco == null ? "" : "CLICK: TAKE IT";
+                }
+                else
+                {
                     text = Describe();
                     action = NeedsTrack(order) && !pointedTrack.HasValue ? "POINT AT TRACK" : "CLICK: " + OrderLabel(order);
                 }
-                var line = text + "\n" + action;
-                if (line == shown)
-                    return;
-                shown = line;
                 Display?.SetContentAndAction(text, action);
             }
             catch (Exception e)
             {
                 Main.Error("AI engineer radio failed", e);
                 session = null;
+                InvalidateDisplay();
             }
         }
 

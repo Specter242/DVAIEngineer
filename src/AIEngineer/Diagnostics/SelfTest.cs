@@ -348,6 +348,26 @@ namespace AIEngineer.Diagnostics
                 yield return HelperPart();
             if (Part("turning"))
                 yield return TurningPart();
+            if (only != null && only.Contains("motors"))
+                yield return Caught("motors", MotorsPart());
+            if (only != null && only.Contains("gradestart"))
+                yield return Caught("grade start", GradeStartPart());
+            if (only != null && only.Contains("cssetout"))
+                yield return Caught("cs set-out", CsSetOutPart());
+            if (only != null && only.Contains("grip"))
+                yield return Caught("grip", GripPart());
+            if (only != null && only.Contains("firing"))
+                yield return Caught("firing", FiringPart());
+            if (only != null && only.Contains("boarding"))
+                yield return Caught("boarding", BoardingPart());
+            if (only != null && only.Contains("trainbrake"))
+                yield return Caught("train brake", TrainBrakePart());
+            if (only != null && only.Contains("cantmove"))
+                yield return Caught("can't move", CantMovePart());
+            if (only != null && only.Contains("firebutton"))
+                yield return Caught("fire button", FireButtonPart());
+            if (only != null && only.Contains("conductor"))
+                yield return Caught("conductor", ConductorPart());
 
             Line($"slowest engineer tick {Session.SlowestTickMs:F2} ms; slowest job-run tick {Session.SlowestJobsTickMs:F2} ms");
             Finish();
@@ -537,7 +557,7 @@ namespace AIEngineer.Diagnostics
             Line($"steam: let go: {s.Steam.Describe()}");
         }
 
- private static IEnumerator HelperPart()
+        private static IEnumerator HelperPart()
         {
             var t = Main.Settings.Whistle;
             Line($"helper: whistle timings: a blip under {t.Shortest:0.##} s, long from {t.ShortestLong:0.##} s, a signal ends {t.QuietEnds:0.##} s after, debounce {t.Bounce:0.##} s, settings version {Main.Settings.WhistleVersion}");
@@ -1000,6 +1020,7 @@ namespace AIEngineer.Diagnostics
         /// </summary>
         private static IEnumerator TabletPart(Session s)
         {
+            yield return OffTheLocos(s.Loco);
             Host.World.ScanCars();
             var state = s.Read();
             var here = Abs(s.Loco);
@@ -1090,7 +1111,9 @@ namespace AIEngineer.Diagnostics
             // Fuel on the loco's card: the nearest station selling diesel, the loco sent there; then undone.
             var stations = Game.Service.Stations(Host.Network);
             Line($"service stations seen: {stations.Count}: {string.Join("; ", stations.Select(st => $"{st.Where} ({string.Join("/", st.Offers)})"))}");
-            var fuelSlot = screen.SlotAt(new Vector2(12 + 1056 - 12 - 160 - 8 - 60, 84 + 82 + 28));
+            // On its card, wherever the card is (the loco the player is on comes first now, 2026-11-19).
+            var card = UI.Tablet.TabletPages.Cards.TryGetValue(s.Loco, out var drawn) ? drawn : new Rect(12, 84, 1056, 236);
+            var fuelSlot = screen.SlotAt(new Vector2(card.xMax - 12 - 160 - 8 - 60, card.y + 82 + 28));
             var queued = s.Engineer.Queue.Count;
             screen.PressSlotForTest(fuelSlot);
             yield return new WaitForSeconds(1);
@@ -1176,6 +1199,8 @@ namespace AIEngineer.Diagnostics
                 var undone = UI.Tablet.TabletUi.UndoForTest();
                 (undone && s.Engineer.Queue.Count == before ? (Action<string, string>)Pass : Fail)("tablet undo", $"undo {(undone ? "pressed" : "not offered")}: {s.Engineer.Queue.Count} orders, {before} before the order");
                 yield return UnownedPick(s, unowned, car, screen);
+                // It moved the player about: the tablet back before the camera, or presses aren't taken.
+                yield return HoldUp(tablet, camera);
                 var station = UI.Tablet.TabletMap.StationShown;
                 if (station != null)
                 {
@@ -1189,6 +1214,37 @@ namespace AIEngineer.Diagnostics
             UI.Tablet.TabletMap.OpenForTest(Core.Booklet.PageRef.Route);
             yield return new WaitForSeconds(1);
             SaveScreen(screen, "tablet-route");
+            // The conductor before the loco-you're-on check, which must stay last (it moves the player).
+            yield return Caught("tablet conductor", TabletConductor(screen, unowned));
+            // A steam loco's card and its Fire button, through the screen's own button.
+            var steamLoco = SpawnLoco("LocoS060");
+            yield return new WaitForSeconds(3);
+            var steamSession = steamLoco != null ? Host.SessionFor(steamLoco, true) : null;
+            if (steamSession?.Steam == null)
+            {
+                Fail("tablet fire button", "no steam loco to show");
+            }
+            else
+            {
+                UI.Tablet.TabletUi.Chosen = steamLoco;
+                UI.Tablet.TabletUi.Page = UI.Tablet.TabletTab.Engineers;
+                yield return new WaitForSeconds(2);
+                SaveScreen(screen, "tablet-steam-crew");
+                var shown = UI.Tablet.TabletPages.FireButtons.TryGetValue(steamLoco, out var fire);
+                var fireSlot = shown ? screen.SlotAt(fire.center) : -1;
+                screen.PressSlotForTest(fireSlot);
+                yield return new WaitForSeconds(1);
+                var youFire = steamSession.Steam.PlayerFires;
+                SaveScreen(screen, "tablet-steam-you");
+                screen.PressSlotForTest(screen.SlotAt(fire.center));
+                yield return new WaitForSeconds(1);
+                (shown && youFire && !steamSession.Steam.PlayerFires ? (Action<string, string>)Pass : Fail)("tablet fire button",
+                    $"at {fire} (slot {fireSlot}): one press gave the fire to the player {youFire}, a second back to the crew {!steamSession.Steam.PlayerFires}");
+            }
+            UI.Tablet.TabletUi.Chosen = s.Loco;
+            if (steamLoco != null)
+                yield return ClearSpawned(new[] { steamLoco });
+            yield return OnTheLoco(s, unowned, screen);
             UnityEngine.Object.Destroy(tablet);
             UI.Tablet.TabletUi.Page = UI.Tablet.TabletTab.Engineers;
         }
@@ -1271,6 +1327,44 @@ namespace AIEngineer.Diagnostics
             catch (UI.Tablet.TabletSurface.Redraw)
             {
             }
+
+        }
+
+        /// <summary>
+        /// On board a company loco, with engineers of the player's own listed: it is listed too, with
+        /// the button to give it orders (SeleneBaby79, 2026-11-19). Last in the tablet's tour: it
+        /// moves the player, and a held Comms Tablet's screen with it.
+        /// </summary>
+        private static IEnumerator OnTheLoco(Session s, TrainCar unowned, Held.EngineerTabletScreen screen)
+        {
+            if (unowned == null)
+                yield break;
+            PlayerManager.TeleportPlayerToCar(unowned);
+            yield return new WaitForSeconds(2);
+            UI.Tablet.TabletUi.Page = UI.Tablet.TabletTab.Engineers;
+            UI.Tablet.TabletPages.OnButtonFor = null;
+            UI.Tablet.TabletUi.RefreshForTest();
+            screen.DrawNow();
+            yield return null;
+            var onList = UI.Tablet.TabletUi.Engineers.Contains(unowned);
+            var besides = UI.Tablet.TabletUi.Engineers.Count(l => l != unowned);
+            SaveScreen(screen, "tablet-on-unowned");
+            (onList && besides > 0 && UI.Tablet.TabletPages.OnButtonFor == unowned && PlayerManager.Car == unowned ? (Action<string, string>)Pass : Fail)("tablet the loco you're on",
+                $"player in {PlayerManager.Car?.ID}; {unowned.ID} listed {onList} with {besides} other(s) ({string.Join(", ", UI.Tablet.TabletUi.Engineers.Select(l => l.ID))}); " +
+                $"button for {UI.Tablet.TabletPages.OnButtonFor?.ID ?? "none"} at {UI.Tablet.TabletPages.OnButton}");
+            yield return OffTheLocos(s.Loco);
+        }
+
+        /// <summary>
+        /// The player on the ground beside <paramref name="near"/>, in no car: the tablet's list has the
+        /// loco the player is on first (2026-11-19), so the tablet's checks start off every loco.
+        /// </summary>
+        private static IEnumerator OffTheLocos(TrainCar near)
+        {
+            if (PlayerManager.Car == null || near == null)
+                yield break;
+            PlayerManager.TeleportPlayer(near.transform.position + near.transform.right * 6 + Vector3.up * 2, Quaternion.identity, null, useRotation: false);
+            yield return new WaitForSeconds(2);
         }
 
         /// <summary>Holds the test's tablet up before the camera for a few frames, its screen to it, as a held tablet is seen.</summary>

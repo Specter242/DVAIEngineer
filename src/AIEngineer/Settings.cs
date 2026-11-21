@@ -39,6 +39,10 @@ namespace AIEngineer
             Tooltip = "Off: the engineer waits for you to start the loco yourself.")]
         public bool AutoStart = true;
 
+        [Draw("You fire new steam engineers",
+            Tooltip = "New engineers on steam locos leave the fire and the water to you: the\nEngineers page's Fire button starts on You. Change it there for one engineer.")]
+        public bool PlayerFiresNewEngineers;
+
         // ---- Braking ----
 
         [Header("Braking")]
@@ -105,9 +109,6 @@ namespace AIEngineer
 
         private const int CurrentWhistle = 1;
 #else
-        // The public release has no developer settings (owner, 2026-11-17: "No developer options or
-        // testbeds"): their tuned values are fixed. Get-only and internal, so Settings.xml neither
-        // writes them nor reads them; a file saved with the developer fields loads, those ignored.
         internal int TickRate => 5;
 
         internal bool LogRoutes => false;
@@ -164,12 +165,11 @@ namespace AIEngineer
             Dip = WhistleDip,
         }.Sane();
 #else
-        /// <summary>The owner's whistle timings of 2026-11-16, fixed.</summary>
         internal WhistleTiming Whistle => WhistleTiming.Default;
 #endif
 
 #if !PUBLIC_RELEASE
- public bool MoveOldWhistle()
+        public bool MoveOldWhistle()
         {
             if (WhistleVersion >= CurrentWhistle)
                 return false;

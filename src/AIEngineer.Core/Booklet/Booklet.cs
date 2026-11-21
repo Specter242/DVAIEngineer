@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using AIEngineer.Core.Tracks;
 
@@ -474,6 +475,15 @@ namespace AIEngineer.Core.Booklet
 
         private sealed class Walker
         {
+            private struct Frame
+            {
+                public int Key;
+                public double Distance;
+                public TrackLink[] Links;
+                public int NextLink;
+                public int LinkCount;
+            }
+
             public TrackGraph Graph;
             public HashSet<int> OnPage;
             public Goal Goal;
@@ -484,38 +494,116 @@ namespace AIEngineer.Core.Booklet
 
             public bool Walk(int track, TrackEnd entered, double distance)
             {
-                if (++Steps > MaxSteps)
-                    return false;
-                Path.Add((track, entered));
-                if (Continue(track, entered, distance + Graph.Length(track)))
-                    return true;
-                Path.RemoveAt(Path.Count - 1);
-                return false;
-            }
+                var startCount = Path.Count;
+                var stack = new Stack<Frame>();
+                var active = new HashSet<int>();
 
-            private bool Continue(int track, TrackEnd entered, double distance)
-            {
-                var far = entered.Other();
-                var links = Graph.Links(track, far);
-                if (links.Length == 0)
-                    return Goal != Goal.Switch;
-                if (distance > MaxWalk)
-                    return Goal == Goal.Away || Goal == Goal.Any;
-                var j = links[0].Junction;
-                if (j == TrackLink.NoJunction)
-                    return Walk(links[0].Track, links[0].End, distance);
-                var info = Graph.Junction(j);
-                var atStem = info.StemTrack == track && info.StemEnd == far;
-                var side = atStem ? -1 : links[0].Branch;
-                if (OnPage.Contains(j))
-                    return Goal == Goal.Any || (Goal == Goal.Switch && j == Junction && (Side == AnySide || Side == side || (Side == AnyBranch && side >= 0)));
-                if (Goal == Goal.Away || Goal == Goal.Any)
+                bool TryPush(int t, TrackEnd e, double d, out bool matched)
+                {
+                    matched = false;
+                    var key = t * 2 + (int)e;
+                    if (active.Contains(key))
+                        return false;
+                    if (++Steps > MaxSteps)
+                        return false;
+
+                    Path.Add((t, e));
+                    active.Add(key);
+
+                    var nextDistance = d + Graph.Length(t);
+                    var far = e.Other();
+                    var links = Graph.Links(t, far);
+                    if (links.Length == 0)
+                    {
+                        if (Goal != Goal.Switch)
+                        {
+                            matched = true;
+                            return true;
+                        }
+                        Path.RemoveAt(Path.Count - 1);
+                        active.Remove(key);
+                        return false;
+                    }
+                    if (nextDistance > MaxWalk)
+                    {
+                        if (Goal == Goal.Away || Goal == Goal.Any)
+                        {
+                            matched = true;
+                            return true;
+                        }
+                        Path.RemoveAt(Path.Count - 1);
+                        active.Remove(key);
+                        return false;
+                    }
+
+                    var j = links[0].Junction;
+                    int linkCount;
+                    if (j == TrackLink.NoJunction)
+                    {
+                        linkCount = 1;
+                    }
+                    else
+                    {
+                        var info = Graph.Junction(j);
+                        var atStem = info.StemTrack == t && info.StemEnd == far;
+                        var side = atStem ? -1 : links[0].Branch;
+                        if (OnPage.Contains(j))
+                        {
+                            if (Goal == Goal.Any || (Goal == Goal.Switch && j == Junction && (Side == AnySide || Side == side || (Side == AnyBranch && side >= 0))))
+                            {
+                                matched = true;
+                                return true;
+                            }
+                            Path.RemoveAt(Path.Count - 1);
+                            active.Remove(key);
+                            return false;
+                        }
+                        if (Goal == Goal.Away || Goal == Goal.Any)
+                        {
+                            matched = true;
+                            return true;
+                        }
+                        linkCount = atStem ? links.Length : 1;
+                    }
+
+                    stack.Push(new Frame
+                    {
+                        Key = key,
+                        Distance = nextDistance,
+                        Links = links,
+                        NextLink = 0,
+                        LinkCount = linkCount,
+                    });
                     return true;
-                if (!atStem)
-                    return Walk(links[0].Track, links[0].End, distance);
-                foreach (var l in links)
-                    if (Walk(l.Track, l.End, distance))
-                        return true;
+                }
+
+                if (!TryPush(track, entered, distance, out var found))
+                    return false;
+                if (found)
+                    return true;
+
+                while (stack.Count > 0)
+                {
+                    var frame = stack.Pop();
+                    if (frame.NextLink >= frame.LinkCount)
+                    {
+                        Path.RemoveAt(Path.Count - 1);
+                        active.Remove(frame.Key);
+                        continue;
+                    }
+                    var link = frame.Links[frame.NextLink++];
+                    stack.Push(frame);
+                    if (TryPush(link.Track, link.End, frame.Distance, out found))
+                    {
+                        if (found)
+                            return true;
+                    }
+                    else if (Steps > MaxSteps)
+                    {
+                        Path.RemoveRange(startCount, Path.Count - startCount);
+                        return false;
+                    }
+                }
                 return false;
             }
         }
@@ -647,10 +735,10 @@ namespace AIEngineer.Core.Booklet
                 {
                     foreach (var b in run.Badges)
                     {
-                        if (b.Text.Length == 0 || !b.Text.All(char.IsDigit) || b.Kind == null)
+                        if (b.Kind == null || string.IsNullOrEmpty(b.Text)
+                            || !int.TryParse(b.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var want))
                             continue;
                         stats.BadgesChecked++;
-                        var want = int.Parse(b.Text, System.Globalization.CultureInfo.InvariantCulture);
                         var named = path.Any(p => YardTrackName.TryParse(nameOf(p.Track), out var yn) && yn.Number == want && yn.Kind == b.Kind);
                         if (named)
                             stats.BadgesAgree++;
@@ -699,9 +787,10 @@ namespace AIEngineer.Core.Booklet
                 // No switch at either end: the track its number badge names, if it has one.
                 foreach (var b in run.Badges)
                 {
-                    if (b.Kind == null || !int.TryParse(b.Text, out var number) || src.Station == null)
+                    if (b.Kind == null || src.Station == null
+                        || !int.TryParse(b.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var number))
                         continue;
-                    if (byName.TryGetValue($"[Y]_[{src.Station}]_[{src.Yard}-{number:00}-{b.Kind}]", out var t))
+                    if (byName.TryGetValue($"[Y]_[{src.Station}]_[{src.Yard}-{number.ToString("00", CultureInfo.InvariantCulture)}-{b.Kind}]", out var t))
                     {
                         found = new List<(int, TrackEnd)> { (t, TrackEnd.Start) };
                         break;

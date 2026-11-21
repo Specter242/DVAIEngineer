@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace AIEngineer.Game
 {
- internal sealed class Helper
+    internal sealed class Helper
     {
         private readonly Session session;
         private readonly WhistleReader ear = new WhistleReader();

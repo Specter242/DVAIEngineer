@@ -132,8 +132,8 @@ namespace AIEngineer.Core.Driving
             return goals;
         }
 
- public static ShovePlan? ShoveIn(TrackGraph graph, int track, double cutLength, IReadOnlyList<OccupiedSpan> standing, int? join = null,
-            Func<int, bool> movable = null)
+        public static ShovePlan? ShoveIn(TrackGraph graph, int track, double cutLength, IReadOnlyList<OccupiedSpan> standing, int? join = null,
+            Func<int, bool> movable = null, TrackEnd? entryOnly = null)
         {
             ShovePlan? best = null;
             var bestCuts = int.MaxValue;
@@ -141,7 +141,7 @@ namespace AIEngineer.Core.Driving
             var length = graph.Length(track);
             foreach (var entry in new[] { TrackEnd.Start, TrackEnd.End })
             {
-                if (graph.Links(track, entry).Length == 0 || standing.Count == 0)
+                if (graph.Links(track, entry).Length == 0 || standing.Count == 0 || (entryOnly.HasValue && entry != entryOnly.Value))
                     continue;
                 var limit = length - (graph.Links(track, entry.Other()).Length == 0 ? BufferMargin : ClearOfEntry);
                 // In from this entry: each cut's near and far edges, all its spans together, nearest first.

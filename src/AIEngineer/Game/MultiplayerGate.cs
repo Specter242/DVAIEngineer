@@ -12,9 +12,9 @@ namespace AIEngineer.Game
     internal static class MultiplayerGate
     {
         private static bool looked;
-        private static PropertyInfo instance;
-        private static PropertyInfo isConnected;
-        private static PropertyInfo isHost;
+        private static bool apiFound;
+        private static bool warned;
+        private static Func<bool> mayDrive;
 
         public static bool MayDrive
         {
@@ -24,15 +24,18 @@ namespace AIEngineer.Game
                 {
                     if (!looked)
                         Look();
-                    var api = instance?.GetValue(null);
-                    if (api == null)
+                    if (!apiFound)
                         return true;
-                    var connected = (bool)isConnected.GetValue(api);
-                    return !connected || (bool)isHost.GetValue(api);
+                    return mayDrive != null && mayDrive();
                 }
-                catch (Exception)
+                catch (Exception e)
                 {
-                    return true;
+                    if (!warned)
+                    {
+                        warned = true;
+                        Main.Warn($"Multiplayer state couldn't be read; engineers disabled until it can: {e.GetBaseException().Message}");
+                    }
+                    return !apiFound;
                 }
             }
         }
@@ -49,12 +52,36 @@ namespace AIEngineer.Game
             }
             if (api == null)
                 return;
-            instance = api.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+            apiFound = true;
+            var instance = api.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
             var iface = instance?.PropertyType;
-            isConnected = iface?.GetProperty("IsConnected");
-            isHost = iface?.GetProperty("IsHost");
-            if (isConnected == null || isHost == null)
-                instance = null;
+            var getInstance = instance?.GetGetMethod();
+            var getConnected = iface?.GetProperty("IsConnected")?.GetGetMethod();
+            var getHost = iface?.GetProperty("IsHost")?.GetGetMethod();
+            if (iface == null || iface.IsValueType || getInstance == null || getConnected == null || getHost == null
+                || getConnected.ReturnType != typeof(bool) || getHost.ReturnType != typeof(bool))
+            {
+                if (!warned)
+                {
+                    warned = true;
+                    Main.Warn("Multiplayer API found, but its host flags didn't match; engineers disabled for safety");
+                }
+                return;
+            }
+            var bind = typeof(MultiplayerGate).GetMethod(nameof(Bind), BindingFlags.NonPublic | BindingFlags.Static)?.MakeGenericMethod(iface);
+            mayDrive = (Func<bool>)bind?.Invoke(null, new object[] { getInstance, getConnected, getHost });
+        }
+
+        private static Func<bool> Bind<TApi>(MethodInfo getInstance, MethodInfo getConnected, MethodInfo getHost) where TApi : class
+        {
+            var instance = (Func<TApi>)Delegate.CreateDelegate(typeof(Func<TApi>), getInstance);
+            var connected = (Func<TApi, bool>)Delegate.CreateDelegate(typeof(Func<TApi, bool>), getConnected);
+            var host = (Func<TApi, bool>)Delegate.CreateDelegate(typeof(Func<TApi, bool>), getHost);
+            return () =>
+            {
+                var api = instance();
+                return api == null || !connected(api) || host(api);
+            };
         }
     }
 }

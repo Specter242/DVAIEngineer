@@ -31,6 +31,10 @@ namespace AIEngineer.Held
         private const int SlotCount = 96;
         private const float RefreshSeconds = 0.5f;
 
+        // One pass of the pages; made once, so a draw allocates no closure.
+        private static readonly Action drawPages = () => TabletUi.Draw(Host.World);
+        private static float nextComplaint;
+
         private Canvas canvas;
         private RectTransform root;
         private TabletSurface surface;
@@ -232,7 +236,14 @@ namespace AIEngineer.Held
             var at = Pointer();
             if (!at.HasValue)
                 return;
-            TabletMap.PressAt(at.Value);
+            try
+            {
+                TabletMap.PressAt(at.Value);
+            }
+            catch (Exception e)
+            {
+                Complain("handling a press on its map", e);
+            }
             dirty = true;
             refreshAt = 0;
         }
@@ -262,14 +273,21 @@ namespace AIEngineer.Held
             if (canvas == null)
                 return;
             var camera = PlayerManager.ActiveCamera;
-            visible = camera != null && shell != null && shell.enabled && shell.gameObject.activeInHierarchy
-                && (transparency == null || !transparency.IsTransparent)
-                && (camera.transform.position - transform.position).sqrMagnitude < 64f;
-            if (display != null)
-                display.enabled = visible && texture != null;
+            var canSee = camera != null && shell != null && shell.enabled && shell.gameObject.activeInHierarchy
+                && (transparency == null || !transparency.IsTransparent);
+            if (canSee)
+            {
+                var toTablet = transform.position - camera.transform.position;
+                var sqr = toTablet.sqrMagnitude;
+                canSee = sqr < 64f && (sqr < 0.25f || Vector3.Dot(camera.transform.forward, toTablet) > 0f);
+            }
+            visible = canSee;
+            var show = visible && texture != null;
+            if (display != null && display.enabled != show)
+                display.enabled = show;
             if (!visible)
             {
-                if (Time.unscaledTime - lastVisibleAt > 10f)
+                if (texture != null && Time.unscaledTime - lastVisibleAt > 10f)
                     ReleaseTexture();
                 return;
             }
@@ -286,10 +304,29 @@ namespace AIEngineer.Held
             if (!visible || !dirty || canvas == null || display == null)
                 return;
             dirty = false;
-            var world = Host.World;
-            surface.Run(() => TabletUi.Draw(world));
-            PlaceMapButton(world);
-            Render();
+            DrawPass();
+        }
+
+        private void DrawPass()
+        {
+            try
+            {
+                surface.Run(drawPages);
+                PlaceMapButton(Host.World);
+                Render();
+            }
+            catch (Exception e)
+            {
+                Complain("drawing its screen", e);
+            }
+        }
+
+        private static void Complain(string what, Exception e)
+        {
+            if (Time.unscaledTime < nextComplaint)
+                return;
+            nextComplaint = Time.unscaledTime + 30f;
+            Main.Error($"The engineer's tablet failed {what}", e);
         }
 
         private void Render()
@@ -331,9 +368,8 @@ namespace AIEngineer.Held
         {
             if (canvas == null)
                 Build();
-            var world = Host.World;
-            surface.Run(() => TabletUi.Draw(world));
-            PlaceMapButton(world);
+            surface.Run(drawPages);
+            PlaceMapButton(Host.World);
             Render();
         }
 

@@ -50,7 +50,7 @@ namespace AIEngineer.Core.Driving
                 return limit;
             var a = Deceleration;
             var at = a * Delay;
-            return -at + Math.Sqrt(at * at + limit * limit + 2 * a * distance);
+            return Math.Max(limit, -at + Math.Sqrt(at * at + limit * limit + 2 * a * distance));
         }
 
         /// <summary>The distance needed to slow from <paramref name="speed"/> to <paramref name="limit"/>.</summary>

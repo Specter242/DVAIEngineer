@@ -303,6 +303,28 @@ public class JobTests
     }
 
     [Fact]
+    public void AShoveInCanBePlannedFromEitherEntryOfAThroughTrack()
+    {
+        // A 300 m through track between two others; cars stand 220-280 m in from its Start.
+        var b = new TrackGraphBuilder();
+        var west = b.AddTrack(200, new MapPoint(-200, 0), new MapPoint(0, 0));
+        var through = b.AddTrack(300, new MapPoint(0, 0), new MapPoint(300, 0));
+        var east = b.AddTrack(200, new MapPoint(300, 0), new MapPoint(500, 0));
+        b.Join(west, TrackEnd.End, through, TrackEnd.Start);
+        b.Join(through, TrackEnd.End, east, TrackEnd.Start);
+        var g = b.Build();
+        var standing = new[] { new OccupiedSpan(220, 280, owner: 7) };
+        var fromStart = OrderGoals.ShoveIn(g, through, 60, standing, entryOnly: TrackEnd.Start);
+        var fromEnd = OrderGoals.ShoveIn(g, through, 60, standing, entryOnly: TrackEnd.End);
+        Assert.NotNull(fromStart);
+        Assert.NotNull(fromEnd);
+        Assert.Equal(220, fromStart!.Value.CoupleTo[0].Position.Offset, 6);
+        Assert.Equal(TrackDirection.Forward, fromStart.Value.Inward);
+        Assert.Equal(280, fromEnd!.Value.CoupleTo[0].Position.Offset, 6);
+        Assert.Equal(TrackDirection.Backward, fromEnd.Value.Inward);
+    }
+
+    [Fact]
     public void WithNoRoomBehindTheFirstCutTheSetOutCouplesOnThroughTheNext()
     {
         var g = Network();

@@ -39,8 +39,13 @@ namespace AIEngineer.Diagnostics
                 Line($"SKIP turning: not the stock map (SM-B7S {from != null}, GF-B3S {to != null}, SM-A4S {cutTrack != null}), or a livery missing");
                 yield break;
             }
-            yield return Caught("turning: the train", TurnsToRunLocoFirst(world, de2, flat, from, to));
-            yield return Caught("turning: the S282 running light", TenderLocoRunsLight(world, s282, tender, from, to));
+            // The station's own job cars may shut any one track in: SM-B7S first, then the others of its yard.
+            world.ScanCars();
+            var starts = yards.SelectMany(y => y.Tracks).Where(t => t.Id.StartsWith("SM-B", StringComparison.Ordinal) && t.Length >= 120 && !world.Occupancy.IsOccupied(t.Track, int.MinValue))
+                .OrderBy(t => t.Id == from.Id ? 0 : 1).ToList();
+            turningFrom = null;
+            yield return Caught("turning: the train", TurnsToRunLocoFirst(world, de2, flat, starts, to));
+            yield return Caught("turning: the S282 running light", TenderLocoRunsLight(world, s282, tender, turningFrom ?? from, to));
             // The A yard's tracks, A4S first: the station's own job cars may stand on any of them.
             var cutTracks = yards.SelectMany(y => y.Tracks).Where(t => t.Id.StartsWith("SM-A", StringComparison.Ordinal) && t.Length >= 60)
                 .OrderBy(t => t.Id == cutTrack.Id ? 0 : 1).ToList();
@@ -176,7 +181,10 @@ namespace AIEngineer.Diagnostics
         private static string Legs(Route route, ConsistEnd locoEnd) => route == null ? "no route"
             : $"{route.Length:F0} m, {route.Reversals} reversals: " + string.Join(", ", route.Legs.Select(l => $"{(l.Leader == locoEnd ? "loco" : "cars")} first {l.Length:F0} m"));
 
-        private static IEnumerator TurnsToRunLocoFirst(World world, TrainCarLivery de2, TrainCarLivery flat, NamedTrack from, NamedTrack to)
+        // The track the train part found a way out from.
+        private static NamedTrack turningFrom;
+
+        private static IEnumerator TurnsToRunLocoFirst(World world, TrainCarLivery de2, TrainCarLivery flat, List<NamedTrack> starts, NamedTrack to)
         {
             const string planned = "turning: a train with its cars ahead plans to turn and run loco first";
             const string ran = "turning: it turned and ran loco first";
@@ -185,17 +193,21 @@ namespace AIEngineer.Diagnostics
             TrainState state = default;
             Route plain = null;
             List<WaypointGoal> goals = null;
+            NamedTrack from = null;
             // The loco at the end away from the Goods Factory: spawned so, or again the other way round.
-            foreach (var locoLast in new[] { false, true })
+            foreach (var (track, locoLast) in starts.SelectMany(t => new[] { (t, false), (t, true) }))
             {
+                from = track;
                 var liveries = new List<TrainCarLivery> { de2, flat, flat, flat, flat };
                 if (locoLast)
                     liveries.Reverse();
                 spawned = CarSpawner.Instance.SpawnCarTypesOnTrack(liveries, liveries.Select(_ => false).ToList(), world.Network.Tracks[from.Track], true, false);
                 if (spawned == null || spawned.Count < 5)
                 {
-                    Fail(planned, $"couldn't spawn a train on {from.Id}");
-                    yield break;
+                    if (spawned != null)
+                        CarSpawner.Instance.DeleteTrainCars(spawned, true);
+                    spawned = null;
+                    continue;
                 }
                 yield return new WaitForSeconds(5);
                 StandBeside(spawned[0]);
@@ -211,6 +223,7 @@ namespace AIEngineer.Diagnostics
                 if (unpriced != null && Shoved(unpriced, state.LocoEnd) > unpriced.Running / 2)
                 {
                     plain = unpriced;
+                    turningFrom = from;
                     break;
                 }
                 CarSpawner.Instance.DeleteTrainCars(spawned, true);
@@ -219,7 +232,7 @@ namespace AIEngineer.Diagnostics
             }
             if (spawned == null)
             {
-                Fail(planned, $"no way round was the loco at the back on {from.Id}");
+                Fail(planned, $"no track of {string.Join(", ", starts.Select(t => t.Id))} gave a train with its loco at the back a route to shove");
                 yield break;
             }
             Dispatch.GoToTrack(s, world, to, queue: false);

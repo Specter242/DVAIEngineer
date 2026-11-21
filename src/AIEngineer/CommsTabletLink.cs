@@ -4,7 +4,7 @@ using System.Reflection;
 
 namespace AIEngineer
 {
- internal static class CommsTabletLink
+    internal static class CommsTabletLink
     {
         private static Func<string, bool> merged;
         private static bool said;

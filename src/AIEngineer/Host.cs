@@ -128,6 +128,21 @@ namespace AIEngineer
             network = null;
             world = null;
             prepareAt = -1;
+            nextBuildAttempt = 0f;
+            try
+            {
+                BookletRenderer.ResetForUnload();
+                BookletReader.Reset();
+                UI.Tablet.TabletMap.ResetForUnload();
+                UI.Tablet.TabletUi.ResetForUnload();
+                UI.Tablet.TabletPages.ResetForUnload();
+                Dispatch.ResetForUnload();
+                Service.ResetForUnload();
+            }
+            catch (Exception e)
+            {
+                Main.Error("AI engineer couldn't reset cached state at unload", e);
+            }
         }
 
         private static void DisposeAll()
@@ -200,6 +215,19 @@ namespace AIEngineer
             };
             sessions.Add(session);
             return session;
+        }
+
+        /// <summary>Whether any loco of the train has an engineer on it, a helper included.</summary>
+        public static bool EngineerOn(Trainset set)
+        {
+            if (set == null)
+                return false;
+            foreach (var s in sessions)
+            {
+                if (s.Loco != null && s.Loco.trainset == set && s.Engineer.Mode != EngineerMode.Off)
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>The loco an engineer would drive for a car: the car itself, or its consist's first loco.</summary>
@@ -280,7 +308,10 @@ namespace AIEngineer
                     sessions.RemoveAt(i);
                     continue;
                 }
-                if (s.Engineer.Mode == EngineerMode.Off)
+                // One crew on a train: an engineer put on it relieves the conductor.
+                if (s.ConductorWorking && EngineerOn(s.Loco.trainset))
+                    s.StandConductorDown("an engineer has the train");
+                if (s.Engineer.Mode == EngineerMode.Off && !s.ConductorWorking)
                     continue;
                 anyOn = true;
                 // Standing with no orders it needs no car scan, and only a look now and then
@@ -304,7 +335,8 @@ namespace AIEngineer
             {
                 tickCursor = (tickCursor + 1) % sessions.Count;
                 var s = sessions[tickCursor];
-                if (s.Engineer.Mode == EngineerMode.Off)
+                var conducting = s.Engineer.Mode == EngineerMode.Off;
+                if (conducting && !s.ConductorWorking)
                     continue;
                 var idle = s.Idle;
                 // Given work while idle: at once, not at its next look.
@@ -314,6 +346,12 @@ namespace AIEngineer
                     continue;
                 s.NextTick = now + (idle ? IdleInterval : interval);
                 budget--;
+                if (conducting)
+                {
+                    // It looks after its own failures, and has no train to stop.
+                    s.TickConductor(now);
+                    continue;
+                }
                 try
                 {
                     s.Tick(now);

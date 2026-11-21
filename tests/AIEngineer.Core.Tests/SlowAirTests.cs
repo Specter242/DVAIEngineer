@@ -153,4 +153,51 @@ public class SlowAirTests
         Assert.Equal(0, controller.Held(SlowFreight).TrainBrake);
         Assert.Equal(controller.Tuning.HoldTrainBrake, controller.Held(SlowFreight, firm: true).TrainBrake);
     }
+
+    [Fact]
+    public void WithCarsTheLocoBrakeStaysLightWhileMovingAndHoldsOnceStopped()
+    {
+        var run = DriveWatchingLoco(AarFreight(), stopAt: 2000, maxSpeed: 40 / 3.6, SlowFreight);
+        Assert.InRange(run.Stop, 1985, 2000.5);
+        Assert.True(run.LocoMovingOver < 3, $"loco brake over {new SpeedController().Tuning.LocoBrakeWithCars} for {run.LocoMovingOver:F1} s on the move");
+        Assert.Equal(1, run.LocoAtStand);
+        var stock = DriveWatchingLoco(new SimTrain(), stopAt: 2000, maxSpeed: 20, new ControlCapabilities { HasTrainBrake = true });
+        Assert.InRange(stock.Stop, 1997, 2000.5);
+        Assert.True(stock.LocoMovingOver < 3, $"stock: loco brake heavy for {stock.LocoMovingOver:F1} s on the move");
+        Assert.Equal(1, stock.LocoAtStand);
+    }
+
+    [Fact]
+    public void ALightEngineStillStopsOnTheLocoBrake()
+    {
+        var output = new SpeedController().Update(new ControlInput { Speed = 1, Target = 0.5, ToStop = 1.2, Dt = 0.2 }, new ControlCapabilities { HasTrainBrake = false });
+        Assert.Equal(1, output.LocoBrake);
+    }
+
+    private static (double Stop, double LocoMovingOver, double LocoAtStand) DriveWatchingLoco(SimTrain train, double stopAt, double maxSpeed, ControlCapabilities caps)
+    {
+        var planner = new SpeedPlanner();
+        var model = caps.SlowAir ? new BrakingModel(0.12, 10) : new BrakingModel(0.25, 3);
+        var controller = new SpeedController();
+        var output = new ControlOutput();
+        double time = 0, still = 0, over = 0;
+        for (var since = 0.2; time < 3600; time += 0.02, since += 0.02)
+        {
+            if (since >= 0.2)
+            {
+                since = 0;
+                var used = caps.SlowAir ? Engineer.SlowAirModel(model, controller.AirHolding) : model;
+                var target = planner.TargetSpeed(train.Position, maxSpeed, stopAt, used);
+                var ahead = planner.TargetSpeed(train.Position + Math.Max(0, train.Speed) * used.Delay, maxSpeed, stopAt, used);
+                output = controller.Update(new ControlInput { Speed = train.Speed, Target = target, TargetAhead = ahead, HasTargetAhead = caps.SlowAir, ToStop = stopAt - train.Position, Dt = 0.2 }, caps);
+                if (Math.Abs(train.Speed) > 0.3 && output.LocoBrake > controller.Tuning.LocoBrakeWithCars + 1e-9)
+                    over += 0.2;
+            }
+            train.Step(output.Throttle, Math.Max(output.TrainBrake, output.DynamicBrake * 0.6), output.LocoBrake, 0.02);
+            still = Math.Abs(train.Speed) < 0.01 && train.Position > 1 ? still + 0.02 : 0;
+            if (still > 5)
+                break;
+        }
+        return (train.Position, over, output.LocoBrake);
+    }
 }

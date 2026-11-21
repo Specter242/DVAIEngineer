@@ -20,7 +20,7 @@ namespace AIEngineer.Game
     /// </summary>
     internal static class BookletRenderer
     {
- public static readonly Color Paper = new Color(0.925f, 0.91f, 0.875f);
+        public static readonly Color Paper = new Color(0.925f, 0.91f, 0.875f);
 
         /// <summary>The pages' own paper: the booklet's scuffed sheets, its cover's, and the route map's stained, gridded one.</summary>
         private static bool IsPaper(string sprite) =>
@@ -43,6 +43,13 @@ namespace AIEngineer.Game
         private static Material lineMaterial;
         private static GameObject preparedFor;
 
+        // Cached projection delegate and scratch parameters so Render allocates no closure on the main thread.
+        private static double projectCenterX, projectCenterY, projectScale, projectHalfW, projectHalfH;
+        private static readonly Func<double, double, Vector2> toPixels = ProjectToPixels;
+
+        private static Vector2 ProjectToPixels(double x, double y) =>
+            new Vector2((float)((x - projectCenterX) * projectScale + projectHalfW), (float)((projectCenterY - y) * projectScale + projectHalfH));
+
         /// <summary>
         /// Draws a page's view: (<paramref name="centerX"/>, <paramref name="centerY"/>) is
         /// the schematic point (y up) at the texture's middle, <paramref name="scale"/>
@@ -64,20 +71,36 @@ namespace AIEngineer.Game
             camera.aspect = target.width / (float)target.height;
             camera.cullingMask = 1 << shown.gameObject.layer;
             camera.targetTexture = target;
-            camera.Render();
-            camera.targetTexture = null;
+            try
+            {
+                camera.Render();
+            }
+            finally
+            {
+                camera.targetTexture = null;
+            }
             if (overlay != null)
             {
                 EnsureMaterial();
                 var previous = RenderTexture.active;
                 RenderTexture.active = target;
                 GL.PushMatrix();
-                GL.LoadPixelMatrix(0, target.width, target.height, 0);
-                lineMaterial.SetPass(0);
-                double w = target.width, h = target.height;
-                overlay((x, y) => new Vector2((float)((x - centerX) * scale + w / 2), (float)((centerY - y) * scale + h / 2)));
-                GL.PopMatrix();
-                RenderTexture.active = previous;
+                try
+                {
+                    GL.LoadPixelMatrix(0, target.width, target.height, 0);
+                    lineMaterial.SetPass(0);
+                    projectCenterX = centerX;
+                    projectCenterY = centerY;
+                    projectScale = scale;
+                    projectHalfW = target.width * 0.5;
+                    projectHalfH = target.height * 0.5;
+                    overlay(toPixels);
+                }
+                finally
+                {
+                    GL.PopMatrix();
+                    RenderTexture.active = previous;
+                }
             }
             return true;
         }
@@ -117,10 +140,24 @@ namespace AIEngineer.Game
         public static void Hide()
         {
             var holder = BookletReader.Holder;
+            if (shown == null && shownRoot == null && (holder == null || !holder.activeSelf))
+                return;
             if (holder != null)
                 holder.SetActive(false);
             shown = null;
             shownRoot = null;
+        }
+
+        /// <summary>Clears cached page references when the world unloads.</summary>
+        public static void ResetForUnload()
+        {
+            Hide();
+            preparedFor = null;
+            shown = null;
+            shownRoot = null;
+#if !PUBLIC_RELEASE
+            PaperReplaced.Clear();
+#endif
         }
 
         private static StaticPageTemplatePaper shown;

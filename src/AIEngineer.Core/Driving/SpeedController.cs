@@ -63,6 +63,18 @@ namespace AIEngineer.Core.Driving
 
         /// <summary>Whether a loco's driven wheels are spinning on the rail.</summary>
         public bool Slipping;
+
+        /// <summary>Traction motor temperature, °C; 0 for a loco without traction motors.</summary>
+        public double MotorHeat;
+
+        /// <summary>The grade the train stands on, rise over run the way it is to go: positive uphill.</summary>
+        public double Uphill;
+
+        /// <summary>The traction generator's current as a share of its limit; 0 when unknown.</summary>
+        public double AmpsShare;
+
+        /// <summary>The lead loco's driving force as a share of what the rail will take before its wheels slip; 0 when unknown.</summary>
+        public double GripShare;
     }
 
     /// <summary>The train's controls as the engineer finds them.</summary>
@@ -98,8 +110,12 @@ namespace AIEngineer.Core.Driving
         public double IntegralBand = 1.5;
         public double IntegralLimit = 0.7;
 
-        /// <summary>The fastest the throttle opens, per second (a crew notches up, it doesn't slam).</summary>
-        public double ThrottleRate = 0.12;
+        /// <summary>
+        /// The fastest the throttle opens, per second: about a notch every 1.4 s
+        /// (a crew notches up, it doesn't slam). At twice this a DE2 under
+        /// 300 t blew its motors' fuse on a grade (in game, 2026-11-18).
+        /// </summary>
+        public double ThrottleRate = 0.06;
 
         /// <summary>
         /// Well under its target (past <see cref="IntegralBand"/>, or standing
@@ -127,13 +143,76 @@ namespace AIEngineer.Core.Driving
         /// <summary>
         /// With the wheels slipping the throttle comes back by this much a
         /// second until they bite, stays at or under where they did for
-        /// <see cref="SlipHold"/> s, and the sand runs for
-        /// <see cref="SandFor"/> s after: a crew's hand on a slipping
-        /// engine. Notching on up through a slip only polishes the rail.
+        /// <see cref="SlipHold"/> s, then rises only by
+        /// <see cref="SlipRecovery"/> a second, feeling for what the rail will
+        /// take. The sand runs for <see cref="SandFor"/> s after a slip; a slip
+        /// within <see cref="SandRepeatWithin"/> s of the sand ending doubles
+        /// that, up to <see cref="SandMost"/>, so wet rail keeps it on and dry
+        /// rail spends little. Notching on up through a slip only polishes the
+        /// rail.
         /// </summary>
         public double SlipCut = 0.5;
         public double SlipHold = 3;
-        public double SandFor = 10;
+        public double SlipRecovery = 0.06;
+        public double SandFor = 4;
+        public double SandRepeatWithin = 6;
+        public double SandMost = 30;
+
+        /// <summary>
+        /// Traction motors over <see cref="MotorEaseFrom"/>, °C, get less
+        /// throttle, falling to <see cref="MotorEaseFloor"/> over the next
+        /// <see cref="MotorEaseSpan"/> degrees: the game blows their fuse after
+        /// 5 s over 120 °C, and a heavy train at low speed gets there at full
+        /// throttle in under half a minute (a DE2 under three loaded hoppers on
+        /// a 1.56 % grade, in game, 2026-11-18).
+        /// </summary>
+        public double MotorEaseFrom = 100;
+        public double MotorEaseSpan = 15;
+        public double MotorEaseFloor = 0.15;
+
+        /// <summary>
+        /// Over this share of the generator's current limit the throttle opens
+        /// no further, and over <see cref="AmpsMost"/> it comes back: the game
+        /// blows the generator's fuse the moment the limit is passed (a DE2
+        /// powering against its brakes on a grade, in game, 2026-11-19).
+        /// </summary>
+        public double AmpsEaseFrom = 0.8;
+        public double AmpsMost = 0.92;
+
+        /// <summary>
+        /// Over this share of the rail's grip the throttle opens no further,
+        /// and over <see cref="GripMost"/> it comes back by
+        /// <see cref="GripCut"/> a second: a crew feels for the rail rather than
+        /// slipping and shutting off. On wet rail a DE2 starting 302 t put 150 kN
+        /// against 84 kN of grip, slipped, shut off, and rolled back (in game,
+        /// 2026-11-19).
+        /// </summary>
+        public double GripEaseFrom = 0.85;
+        public double GripMost = 0.97;
+        public double GripCut = 0.15;
+
+        /// <summary>Taking up power against the brakes stops at this share of the grip: past it the wheels would slip once the brakes are off.</summary>
+        public double GripTakeUp = 0.8;
+
+        /// <summary>
+        /// Starting uphill from at least this grade with the train brake on,
+        /// the engineer takes up power against the brakes first, then lets
+        /// the train brake off while the loco brake and the power hold it,
+        /// and lets the loco brake off once the cars are free. The other way
+        /// round (brakes off, then power) a heavy train rolls back on the loco
+        /// brake alone, and on wet rail never gets going (a DE2 under 302 t on
+        /// 0.98 %, in game, 2026-11-18).
+        /// </summary>
+        public double GradeStartFrom = 0.004;
+
+        /// <summary>The throttle taken up against the brakes: this, and <see cref="GradeStartPerGrade"/> per unit of grade, to at most <see cref="GradeStartMost"/>.</summary>
+        public double GradeStartPower = 0.2;
+        public double GradeStartPerGrade = 15;
+        public double GradeStartMost = 0.6;
+
+        /// <summary>The sand runs through a grade start until the train has this speed, m/s, or for at most <see cref="GradeStartSandFor"/> s from the release.</summary>
+        public double GradeStartSandBelow = 1.5;
+        public double GradeStartSandFor = 30;
 
         /// <summary>Under slow air, the most throttle worked against a set train brake: past it, the brake comes off rather than fight the power.</summary>
         public double AirStretchMax = 0.35;
@@ -169,6 +248,74 @@ namespace AIEngineer.Core.Driving
 
         /// <summary>The train brake held while standing.</summary>
         public double HoldTrainBrake = 0.5;
+
+        /// <summary>
+        /// With cars behind the loco, the train brake does the slowing and
+        /// stopping and the loco brake stays at or under this while the train
+        /// moves (Ender Voidwalker, 2026-11-19: with ten cars behind, "the
+        /// Engineer really wants to use the Independent at full tilt"); under
+        /// <see cref="StandingBelow"/> m/s it goes full to hold the train.
+        /// A light engine brakes on the loco brake as before.
+        /// </summary>
+        public double LocoBrakeWithCars = 0.2;
+        public double StandingBelow = 0.1;
+
+        /// <summary>Under slow air with cars behind, the train brake's first application at this overspeed, m/s, so it leads (alone, <see cref="AirApplyOverspeed"/>).</summary>
+        public double AirApplyOverspeedWithCars = 0.5;
+
+        /// <summary>On stock air with cars, the train brake for the last meters to the mark (the loco brake light): 0.7 with the loco brake full, before.</summary>
+        public double FinalTrainBrakeWithCars = 0.85;
+
+        /// <summary>On stock air with cars, this far over the target in the last meters, m/s, the loco brake goes full with the train brake.</summary>
+        public double AllBrakeBehind = 2.0;
+
+        /// <summary>Under slow air with cars, seconds between steps of the train brake in the last meters, when the train isn't slowing enough to stop at the mark.</summary>
+        public double AirFinalStepWait = 3;
+
+        /// <summary>
+        /// A held train moving faster than this, m/s, gets the whole train
+        /// brake, kept until it next takes power; and so does one held on a
+        /// grade of <see cref="GradeStartFrom"/> or more, from the first. On
+        /// wet rail on 1.08 %, 302 t held at 0.3 or 0.5 of the train brake
+        /// slid (the game's wheel slide, a fifth of the grip) and crept back;
+        /// at 0.7 or all of it, it stood (in game, 2026-11-19).
+        /// </summary>
+        public double HoldCreep = 0.05;
+
+        /// <summary>
+        /// Pulling uphill from this grade under this speed, m/s, with this much
+        /// throttle or more, the sand runs: a crew sands a heavy train up a
+        /// bank. Under that speed with the pull near the rail's grip
+        /// (<see cref="GripEaseFrom"/>) it runs too, whatever the throttle: on
+        /// wet rail the grip runs out long before the throttle is open.
+        /// </summary>
+        public double SandUphillFrom = 0.01;
+        public double SandUphillBelow = 3;
+        public double SandUphillThrottle = 0.5;
+
+        /// <summary>
+        /// Trying to move the train for <see cref="GiveUpAfter"/> s (wanting
+        /// <see cref="GiveUpTarget"/> m/s or more, the stop at least
+        /// <see cref="GiveUpStopClear"/> m off; waits for air, steam, a
+        /// switch, or a stop not counted) and making less than
+        /// <see cref="GiveUpRun"/> m of it, the engineer gives up: it can't
+        /// start or keep the train moving here. A DE2 and 302 t on wet rail
+        /// at 1.6 % under the train made 0 to 35 m in its first 180 s each
+        /// time it failed, and 76 m or more each time it got away; once
+        /// only 10 m in the first 120 s (in game, 2026-11-19).
+        /// </summary>
+        public double GiveUpAfter = 180;
+        public double GiveUpRun = 30;
+        public double GiveUpTarget = 0.3;
+        public double GiveUpStopClear = 15;
+
+        /// <summary>
+        /// Rolled back this far, m, over its tries (net of the way made), it
+        /// gives up at once: a start that got away never rolled back at all
+        /// (2026-11-19), and a DE2 and 678 t on wet 1.8 % lost 46 m in the 180
+        /// s it took to give up.
+        /// </summary>
+        public double GiveUpRollBack = 5;
 
         /// <summary>
         /// Under slow air a hold keeps only what is set, the loco brake
@@ -276,7 +423,9 @@ namespace AIEngineer.Core.Driving
         // How long the loco brake has had the last meters without slowing the train.
         private double notSlowingFor;
         // The throttle the wheels last bit at after slipping, until when it is kept to, and until when the sand runs.
-        private double slipCeiling;
+        private double slipCeiling = 1;
+        private double sandFor;
+        private bool wasSlipping;
         private double slipUntil = double.NegativeInfinity;
         private double sandUntil = double.NegativeInfinity;
 
@@ -305,8 +454,87 @@ namespace AIEngineer.Core.Driving
         /// <summary>How many times in a row the train wouldn't move under power: reset once it does.</summary>
         public int Stalls { get; private set; }
 
+        /// <summary>Set once trying hasn't moved the train far enough (<see cref="ControlTuning.GiveUpAfter"/>); cleared by <see cref="ForgetTries"/>.</summary>
+        public CantMove CantMove { get; private set; }
+
+        /// <summary>Meters the train has made good while trying, since the last <see cref="ForgetTries"/>.</summary>
+        public double Progress => odometer;
+
+        // The watch on a train that won't move: time spent trying, the meters made good, and a
+        // sample of both every few seconds (a fixed ring: no allocation as it runs).
+        private const int Samples = 64;
+        private const double SampleEvery = 5;
+        private readonly double[] sampleAt = new double[Samples];
+        private readonly double[] sampleRun = new double[Samples];
+        private int sampleCount;
+        private int sampleNext;
+        private double tryClock;
+        private double odometer;
+        private double nextSample;
+        private double gripBound;
+        private double powerBound;
+
+        /// <summary>
+        /// Starts the watch on a train that won't move afresh: a new order.
+        /// Not <see cref="Reset"/>, which a hold calls every tick: a train
+        /// rolling back, stopped, and tried again is still the same try.
+        /// </summary>
+        public void ForgetTries()
+        {
+            CantMove = CantMove.No;
+            sampleCount = 0;
+            sampleNext = 0;
+            tryClock = 0;
+            odometer = 0;
+            nextSample = 0;
+            gripBound = 0;
+            powerBound = 0;
+        }
+
+        /// <summary>
+        /// One tick of trying to move the train: the meters made good, what
+        /// held it back (the rail's grip, or the loco's power), and whether
+        /// it has made too little of a fair try.
+        /// </summary>
+        private void Watch(ControlInput input, double speed)
+        {
+            var t = Tuning;
+            if (CantMove != CantMove.No || input.Target < t.GiveUpTarget || input.ToStop < t.GiveUpStopClear || input.Dt <= 0)
+                return;
+            tryClock += input.Dt;
+            odometer += speed * input.Dt;
+            if (input.Slipping || input.GripShare > t.GripEaseFrom)
+                gripBound += input.Dt;
+            else if (Resting || throttle >= 0.9 || input.AmpsShare > t.AmpsEaseFrom || input.MotorHeat > t.MotorEaseFrom)
+                powerBound += input.Dt;
+            if (tryClock >= nextSample)
+            {
+                sampleAt[sampleNext] = tryClock;
+                sampleRun[sampleNext] = odometer;
+                sampleNext = (sampleNext + 1) % Samples;
+                sampleCount = Math.Min(Samples, sampleCount + 1);
+                nextSample = tryClock + SampleEvery;
+            }
+            // The newest sample at least the window back.
+            var since = double.NaN;
+            for (var i = 0; i < sampleCount; i++)
+            {
+                var k = (sampleNext - 1 - i + Samples) % Samples;
+                if (sampleAt[k] <= tryClock - t.GiveUpAfter)
+                {
+                    since = sampleRun[k];
+                    break;
+                }
+            }
+            if ((!double.IsNaN(since) && odometer - since < t.GiveUpRun) || odometer < -t.GiveUpRollBack)
+                CantMove = gripBound > 0 && gripBound >= powerBound ? CantMove.Grip : powerBound > 0 ? CantMove.Power : CantMove.Unknown;
+        }
+
         /// <summary>Set by the last update when it held the train to let the brakes come off before taking power.</summary>
         public bool WaitingForAir { get; private set; }
+
+        /// <summary>Set by the last update when, starting uphill, it took up power against the brakes still on.</summary>
+        public bool TakingUpPower { get; private set; }
 
         public void Reset()
         {
@@ -321,6 +549,9 @@ namespace AIEngineer.Core.Driving
             targetRate = 0;
             curveWas = false;
             notSlowingFor = 0;
+            slipCeiling = 1;
+            wasSlipping = false;
+            gradeStart = GradeStart.None;
         }
 
         /// <summary>
@@ -330,8 +561,12 @@ namespace AIEngineer.Core.Driving
         /// stand, and whatever stops a train still moving at
         /// <paramref name="speed"/>, m/s.
         /// </summary>
-        public ControlOutput Held(ControlCapabilities caps, bool firm = false, double speed = 0)
+        public ControlOutput Held(ControlCapabilities caps, bool firm = false, double speed = 0, double grade = 0)
         {
+            // On a grade, the whole train brake from the first: on wet rail half of it lets the
+            // wheels slide and the train creep, and once sliding no more brake stops it.
+            if (Math.Abs(grade) >= Tuning.GradeStartFrom)
+                holdHard = true;
             if (!caps.HasTrainBrake)
                 airSet = 0;
             double train = 0;
@@ -352,7 +587,10 @@ namespace AIEngineer.Core.Driving
                 }
                 else
                 {
-                    train = Tuning.HoldTrainBrake;
+                    // Creeping on the hold (wet rail on a grade): all the brake, until it next takes power.
+                    if (Math.Abs(speed) > Tuning.HoldCreep)
+                        holdHard = true;
+                    train = holdHard ? 1 : Tuning.HoldTrainBrake;
                 }
             }
             return new ControlOutput { TrainBrake = train, LocoBrake = 1 };
@@ -365,6 +603,7 @@ namespace AIEngineer.Core.Driving
             var speed = input.Speed;
             clock += input.Dt;
             WaitingForAir = false;
+            TakingUpPower = false;
             var slow = caps.SlowAir && caps.HasTrainBrake;
             if (!caps.HasTrainBrake)
                 airSet = 0;
@@ -406,19 +645,33 @@ namespace AIEngineer.Core.Driving
                 || (input.Target <= 0.01 && Math.Abs(speed) < 0.3 && (input.Halt || double.IsPositiveInfinity(input.ToStop))))
             {
                 notSlowingFor = 0;
-                return HoldStopped(caps, speed);
+                return HoldStopped(caps, speed, input.Uphill);
             }
 
             // Standing with brakes still on behind the loco: let them off (the train brake
             // released, the loco brake holding) and take no power until they are.
             if (input.BrakesDragging && Math.Abs(speed) < 0.05)
             {
+                braking = false;
+                WaitingForAir = true;
+                if (caps.HasTrainBrake && input.Uphill >= t.GradeStartFrom)
+                {
+                    // No speed asked for yet (an order's first tick): the brakes stay on, never let off unpowered.
+                    if (input.Target <= 0.01)
+                        return new ControlOutput { LocoBrake = 1, TrainBrake = slow ? airSet : holdHard ? 1 : t.HoldTrainBrake };
+                    return TakeUpPower(input, slow);
+                }
                 throttle = 0;
                 integral = 0;
-                braking = false;
                 airSet = 0;
-                WaitingForAir = true;
+                gradeStart = GradeStart.None;
                 return new ControlOutput { LocoBrake = 1 };
+            }
+            if (gradeStart != GradeStart.None)
+            {
+                // The cars are free: the power taken up carries on from where it stands.
+                integral = Math.Max(integral, throttle);
+                gradeStart = GradeStart.None;
             }
 
             // Never let the target fall below a creep while a stop is still ahead,
@@ -463,9 +716,26 @@ namespace AIEngineer.Core.Driving
                         airSet = 1;
                         airSetAt = clock;
                     }
+                    // With cars the loco brake is light: slowing less than it takes to stop at the mark,
+                    // the train brake is stepped up (or set), a step at a time.
+                    else if (caps.HasTrainBrake && airSet < 1 && speed > 0.3 && clock - airSetAt > t.AirFinalStepWait
+                        && -acceleration < speed * speed / (2 * Math.Max(0.5, input.ToStop - t.FinalStopDistance)))
+                    {
+                        airSet = airSet > 0 ? Math.Min(1, airSet + t.AirStep) : t.AirFirstSet;
+                        airSetAt = clock;
+                    }
                 }
-                output.TrainBrake = slow ? airSet : caps.HasTrainBrake ? 0.7 : 0;
-                output.LocoBrake = 1;
+                output.TrainBrake = slow ? airSet : caps.HasTrainBrake ? (behindTheCurve ? 1 : t.FinalTrainBrakeWithCars) : 0;
+                // With cars, the train brake stops the train and the loco brake holds it once it stands;
+                // a stop the train brake isn't making in time (behind the curve, past the mark, not
+                // slowing) gets all the brake there is.
+                // (Stock air: the train brake's full service comes on at once, so only past the mark or
+                // well behind the curve; in game a train came into the last meters a little behind it
+                // at every stop, and the loco brake went full for 7 s.)
+                var short_ = slow
+                    ? behindTheCurve || input.ToStop <= 0 || notSlowingFor > t.AirFinalPatience
+                    : input.ToStop <= 0 || speed - input.Target > t.AllBrakeBehind;
+                output.LocoBrake = caps.HasTrainBrake && Math.Abs(speed) >= t.StandingBelow && !short_ ? t.LocoBrakeWithCars : 1;
                 return output;
             }
             notSlowingFor = 0;
@@ -476,6 +746,7 @@ namespace AIEngineer.Core.Driving
             if (braking ? -shortfall < brakeOff : -shortfall < brakeOn)
             {
                 braking = false;
+                Watch(input, speed);
                 if (slow && airSet > 0)
                 {
                     // The application stays on until the train is well under its target with no
@@ -516,15 +787,51 @@ namespace AIEngineer.Core.Driving
                     throttle = Math.Max(0, Math.Min(throttle, throttleWas) - t.SlipCut * input.Dt);
                     slipCeiling = throttle;
                     slipUntil = clock + t.SlipHold;
-                    sandUntil = clock + t.SandFor;
+                    if (!wasSlipping)
+                        sandFor = clock - sandUntil < t.SandRepeatWithin ? Math.Min(t.SandMost, Math.Max(t.SandFor, sandFor * 2)) : t.SandFor;
+                    sandUntil = clock + sandFor;
                 }
-                else if (clock < slipUntil)
+                else if (slipCeiling < 1)
                 {
+                    if (clock >= slipUntil)
+                        slipCeiling = Math.Min(1, slipCeiling + t.SlipRecovery * input.Dt);
                     throttle = Math.Min(throttle, slipCeiling);
+                    integral = Math.Min(integral, slipCeiling);
                 }
+                wasSlipping = input.Slipping;
+                // Hot motors: as much as they can take and no more, however far short the train is.
+                if (input.MotorHeat > t.MotorEaseFrom)
+                {
+                    var most = Math.Max(t.MotorEaseFloor, 1 - (input.MotorHeat - t.MotorEaseFrom) / t.MotorEaseSpan);
+                    if (throttle > most)
+                    {
+                        throttle = most;
+                        integral = Math.Min(integral, throttle);
+                    }
+                }
+                // Near the rail's grip: no more, and just under it, a little less.
+                if (input.GripShare > t.GripEaseFrom && throttle > throttleWas)
+                    throttle = throttleWas;
+                // Back only toward what the rail will take, never all the way off: shut off, a train
+                // on a wet grade rolls back and starts again, and again (in game, 2026-11-19).
+                if (input.GripShare > t.GripMost)
+                    throttle = Math.Max(throttleWas * t.GripEaseFrom / input.GripShare, Math.Min(throttle, throttleWas) - t.GripCut * input.Dt);
+                if (input.GripShare > t.GripEaseFrom)
+                    integral = Math.Min(integral, throttle);
+                // Near the generator's limit: no more, and over it, less.
+                if (input.AmpsShare > t.AmpsEaseFrom && throttle > throttleWas)
+                    throttle = throttleWas;
+                if (input.AmpsShare > t.AmpsMost)
+                    throttle = Math.Max(0, Math.Min(throttle, throttleWas) - t.SlipCut * input.Dt);
+                if (input.AmpsShare > t.AmpsEaseFrom)
+                    integral = Math.Min(integral, throttle);
                 if (clock < slipUntil)
                     integral = Math.Min(integral, throttle);
-                output.Sand = clock < sandUntil;
+                output.Sand = clock < sandUntil || (clock < gradeSandUntil && speed < t.GradeStartSandBelow)
+                    || (input.Uphill >= t.SandUphillFrom && speed < t.SandUphillBelow && throttle >= t.SandUphillThrottle)
+                    || (speed < t.SandUphillBelow && input.GripShare > t.GripEaseFrom);
+                if (!Resting)
+                    holdHard = false;
                 // A train that won't move under power: rest the motors rather than burn them.
                 // Not moving forward under power: standing, or rolling back down the grade;
                 // or its wheels only spinning.
@@ -545,11 +852,19 @@ namespace AIEngineer.Core.Driving
                 }
                 if (Resting)
                 {
+                    // Resting on a grade, held on the brakes: on the loco brake alone a heavy train rolls back.
                     throttle = 0;
                     integral = 0;
                     output.Throttle = 0;
                     output.LocoBrake = 1;
-                    output.TrainBrake = slow ? airSet : 0;
+                    if (Math.Abs(speed) > t.HoldCreep)
+                        holdHard = true;
+                    output.TrainBrake = !caps.HasTrainBrake ? 0 : slow ? Math.Max(airSet, holdHard ? 1 : 0) : holdHard ? 1 : t.HoldTrainBrake;
+                    if (slow && output.TrainBrake > airSet)
+                    {
+                        airSet = output.TrainBrake;
+                        airSetAt = clock;
+                    }
                     return output;
                 }
                 output.Throttle = throttle;
@@ -572,7 +887,7 @@ namespace AIEngineer.Core.Driving
                 var over = -shortfall;
                 if (airSet <= 0)
                 {
-                    if (over > (input.Tight ? t.TightAirApplyOverspeed : t.AirApplyOverspeed))
+                    if (over > (input.Tight ? t.TightAirApplyOverspeed : caps.HasTrainBrake ? t.AirApplyOverspeedWithCars : t.AirApplyOverspeed))
                     {
                         airSet = t.AirFirstSet;
                         airSetAt = clock;
@@ -593,7 +908,7 @@ namespace AIEngineer.Core.Driving
                     }
                 }
                 output.TrainBrake = airSet;
-                output.LocoBrake = brake;
+                output.LocoBrake = caps.HasTrainBrake ? Math.Min(brake, t.LocoBrakeWithCars) : brake;
                 if (caps.HasDynamicBrake)
                     output.DynamicBrake = Clamp(brake * 1.5, 0, 1);
                 return output;
@@ -607,14 +922,69 @@ namespace AIEngineer.Core.Driving
             return output;
         }
 
-        private ControlOutput HoldStopped(ControlCapabilities caps, double speed)
+        private enum GradeStart
+        {
+            None,
+            Against,
+            Releasing,
+        }
+
+        private GradeStart gradeStart;
+        private bool holdHard;
+        private double gradeSandUntil = double.NegativeInfinity;
+
+        /// <summary>
+        /// A start uphill with the brakes still on: power up against them
+        /// (train brake as set, loco brake full), then the train brake off
+        /// with the loco brake and the power holding, the sand running.
+        /// </summary>
+        private ControlOutput TakeUpPower(ControlInput input, bool slow)
+        {
+            var t = Tuning;
+            Watch(input, input.Speed);
+            var want = Math.Min(t.GradeStartMost, t.GradeStartPower + t.GradeStartPerGrade * input.Uphill);
+            if (input.MotorHeat > t.MotorEaseFrom)
+                want = Math.Min(want, Math.Max(t.MotorEaseFloor, 1 - (input.MotorHeat - t.MotorEaseFrom) / t.MotorEaseSpan));
+            if (gradeStart == GradeStart.None)
+                gradeStart = GradeStart.Against;
+            // Against locked wheels the current climbs fast: taken up as far as the generator allows.
+            if (input.AmpsShare > t.AmpsMost)
+                throttle = Math.Max(0, throttle - t.SlipCut * input.Dt);
+            else if (input.AmpsShare <= t.AmpsEaseFrom && input.GripShare <= t.GripTakeUp)
+                throttle = Math.Min(want, throttle + t.ThrottleRate * input.Dt);
+            integral = throttle;
+            gradeSandUntil = clock + t.GradeStartSandFor;
+            if (gradeStart == GradeStart.Against && (throttle >= want - 1e-9 || input.AmpsShare > t.AmpsEaseFrom || input.GripShare > t.GripTakeUp))
+                gradeStart = GradeStart.Releasing;
+            if (gradeStart == GradeStart.Against)
+            {
+                TakingUpPower = true;
+                return new ControlOutput { Throttle = throttle, LocoBrake = 1, TrainBrake = slow ? airSet : holdHard ? 1 : t.HoldTrainBrake, Sand = true };
+            }
+            airSet = 0;
+            return new ControlOutput { Throttle = throttle, LocoBrake = 1, Sand = true };
+        }
+
+        private ControlOutput HoldStopped(ControlCapabilities caps, double speed, double grade)
         {
             throttle = 0;
             integral = 0;
             braking = true;
-            return Held(caps, speed: speed);
+            return Held(caps, speed: speed, grade: grade);
         }
 
         private static double Clamp(double v, double lo, double hi) => v < lo ? lo : v > hi ? hi : v;
+    }
+
+    /// <summary>Whether the engineer can move its train, and if not, what held it back.</summary>
+    public enum CantMove
+    {
+        No,
+        /// <summary>The wheels slipped, or the pull stood at the rail's grip.</summary>
+        Grip,
+        /// <summary>The loco's power: the throttle open, the current or the motors' heat at their limit, or resting after a stall.</summary>
+        Power,
+        /// <summary>Neither: something else holds it (a hand brake, a brake that won't come off).</summary>
+        Unknown,
     }
 }

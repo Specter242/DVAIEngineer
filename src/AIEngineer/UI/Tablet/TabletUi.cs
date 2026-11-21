@@ -14,9 +14,10 @@ namespace AIEngineer.UI.Tablet
         Engineers,
         Map,
         Jobs,
+        Conductor,
     }
 
- internal static class TabletUi
+    internal static class TabletUi
     {
         private const float ListSeconds = 1f;
 
@@ -32,6 +33,18 @@ namespace AIEngineer.UI.Tablet
         private static bool chosenOnce;
 
         public static IReadOnlyList<TrainCar> Engineers => engineers;
+
+        /// <summary>Clears cached loco selection, list, and undo state when the world unloads.</summary>
+        public static void ResetForUnload()
+        {
+            Page = TabletTab.Engineers;
+            Chosen = null;
+            chosenOnce = false;
+            engineers.Clear();
+            nextList = 0f;
+            lastOrder = null;
+            undo = null;
+        }
 
         /// <summary>A pass of the screen: the tab bar, then the page.</summary>
         public static void Draw(World world)
@@ -54,12 +67,21 @@ namespace AIEngineer.UI.Tablet
                     TabletPages.Jobs(world);
                     DrawLast(new Rect(12, H - 72, W - 24, 60));
                     break;
+                case TabletTab.Conductor:
+                    TabletPages.Conductor();
+                    DrawLast(new Rect(12, H - 72, W - 24, 60));
+                    break;
                 default:
                     TabletPages.Engineers(world);
                     DrawLast(new Rect(12, H - 72, W - 24, 60));
                     break;
             }
         }
+
+#if !PUBLIC_RELEASE
+        /// <summary>Reads the list afresh now (the self-test's).</summary>
+        internal static void RefreshForTest() => RefreshList();
+#endif
 
         private static void RefreshList()
         {
@@ -72,11 +94,13 @@ namespace AIEngineer.UI.Tablet
                 if (s.Loco != null && s.Engineer.Mode != EngineerMode.Off && !engineers.Contains(s.Loco))
                     engineers.Add(s.Loco);
             }
-            // The other locos in the train the player drives: one may be a helper.
+            // The loco the player is on, whoever's it is, and the locos coupled to it (one may be
+            // a helper; a consist of company locos is given orders from here). 0.15.3 listed only
+            // the player's own (SeleneBaby79, 2026-11-19: five DE6s, none of them listed).
             var lead = LeadOf(PlayerManager.Car);
             if (lead?.trainset != null)
                 foreach (var car in lead.trainset.cars)
-                    if (car != null && car != lead && car.IsLoco && !engineers.Contains(car))
+                    if (car != null && car.IsLoco && !engineers.Contains(car))
                         engineers.Add(car);
             // A loco picked by hand ("Give orders to it" on the map) stays picked while it exists, and has
             // its plate, though it isn't the player's own and has no engineer yet: its first order gives it
@@ -96,9 +120,9 @@ namespace AIEngineer.UI.Tablet
                 Chosen = engineers.Count > 0 ? engineers[0] : null;
         }
 
-        // ---- The tab bar: the three pages, then a plate for each engineer ----
+        // ---- The tab bar: the pages, then a plate for each engineer ----
 
-        private static readonly (TabletTab Tab, string Label)[] Tabs = { (TabletTab.Engineers, "Engineers"), (TabletTab.Map, "Map"), (TabletTab.Jobs, "Jobs") };
+        private static readonly (TabletTab Tab, string Label)[] Tabs = { (TabletTab.Engineers, "Engineers"), (TabletTab.Map, "Map"), (TabletTab.Jobs, "Jobs"), (TabletTab.Conductor, "Conductor") };
 
         private static void DrawTabBar()
         {

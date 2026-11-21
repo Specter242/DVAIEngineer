@@ -36,7 +36,14 @@ namespace AIEngineer.Game
 
         private static readonly MethodInfo PaperData = typeof(StaticTextureRenderBase).GetMethod("GetStaticTemplatePaperData", BindingFlags.Instance | BindingFlags.NonPublic);
 
+        private const float RetryCooldown = 5f;
+        private const float MaxRetryCooldown = 60f;
+
         private static Network readFor;
+        private static Network failedFor;
+        private static int failedAttempts;
+        private static string lastProblem;
+        private static float nextAttempt;
         private static Booklet booklet;
         private static List<SchematicSource> sources;
         private static GameObject holder;
@@ -52,6 +59,46 @@ namespace AIEngineer.Game
         /// <summary>Where the copies stand: far below the world, out of any other camera's way.</summary>
         public static readonly Vector3 Below = new Vector3(0, -30000, 0);
 
+        /// <summary>Releases cached booklet data and copies when the world unloads.</summary>
+        public static void Reset()
+        {
+            DestroyHolder();
+            readFor = null;
+            failedFor = null;
+            failedAttempts = 0;
+            lastProblem = null;
+            nextAttempt = 0f;
+            booklet = null;
+            sources = null;
+            grids.Clear();
+        }
+
+        private static void RecordFailure(Network network, string problem)
+        {
+            if (failedFor != network)
+            {
+                failedFor = network;
+                failedAttempts = 0;
+                lastProblem = null;
+            }
+            if (!string.Equals(lastProblem, problem, StringComparison.Ordinal))
+            {
+                lastProblem = problem;
+                Main.Log($"Booklet not read: {problem}");
+            }
+            var delay = Mathf.Min(MaxRetryCooldown, RetryCooldown * (1 << Math.Min(failedAttempts, 4)));
+            failedAttempts++;
+            nextAttempt = Time.unscaledTime + delay;
+        }
+
+        private static void DestroyHolder()
+        {
+            if (holder != null)
+                Object.Destroy(holder);
+            holder = null;
+            BookletCopy = RouteCopy = null;
+        }
+
         /// <summary>The booklet matched to the network; null if the game's couldn't be read (the reason is logged).</summary>
         public static Booklet Get(Network network)
         {
@@ -59,30 +106,39 @@ namespace AIEngineer.Game
                 return null;
             if (readFor == network)
                 return booklet;
-            readFor = network;
+            if (failedFor == network && Time.unscaledTime < nextAttempt)
+                return null;
+            readFor = null;
             booklet = null;
             sources = null;
-            if (holder != null)
-                Object.Destroy(holder);
-            holder = null;
-            BookletCopy = RouteCopy = null;
+            DestroyHolder();
             var watch = Stopwatch.StartNew();
             try
             {
-                sources = Read(network, out var problem);
-                if (sources == null)
+                var readSources = Read(network, out var problem);
+                if (readSources == null)
                 {
-                    Main.Log($"Booklet not read: {problem}");
+                    DestroyHolder();
+                    RecordFailure(network, problem);
                     return null;
                 }
                 var read = watch.ElapsedMilliseconds;
-                booklet = Booklet.Build(sources, network.Graph, t => network.Tracks[t].name);
+                var built = Booklet.Build(readSources, network.Graph, t => network.Tracks[t].name);
+                sources = readSources;
+                booklet = built;
+                readFor = network;
+                failedFor = null;
+                failedAttempts = 0;
+                lastProblem = null;
+                nextAttempt = 0f;
                 Main.Log($"Booklet: {booklet.Stations.Count} stations, {sources.Count} pages, read in {read} ms, matched in {watch.ElapsedMilliseconds - read} ms: {booklet.Stats}; touch grids: {Grids}");
             }
             catch (Exception e)
             {
-                Main.Log($"Booklet not read: {e}");
                 booklet = null;
+                sources = null;
+                DestroyHolder();
+                RecordFailure(network, e.ToString());
             }
             return booklet;
         }
@@ -93,6 +149,7 @@ namespace AIEngineer.Game
         private static List<SchematicSource> Read(Network network, out string problem)
         {
             problem = null;
+            grids.Clear();
             var data = SingletonBehaviour<LevelInfo>.Instance != null ? SingletonBehaviour<LevelInfo>.Instance.junctionData : null;
             if (data == null)
             {

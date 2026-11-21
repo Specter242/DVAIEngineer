@@ -1,3 +1,4 @@
+using System.Globalization;
 using AIEngineer.Core.Driving;
 
 namespace AIEngineer.Core.Tests;
@@ -93,7 +94,7 @@ public class WhistleTests
         Assert.Equal(WhistleSignal.Go, ear.Signals.Single().Signal);
     }
 
- [Theory]
+    [Theory]
     [InlineData("0 0 0 0 0 0 60 95 99 100 100 100 100 100 100 100 100 100 100 100 100 86 0 0 0 69 96 61 0 0 76 98 100 100 100 100 100 100 100 100 100 100 100 100 100 19 0 0 0 80 87 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0", "Go", 2)]
     [InlineData("0 0 0 0 0 0 62 96 99 100 100 100 100 100 100 100 91 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0", "Stop", 1)]
     [InlineData("0 0 0 0 0 0 77 97 100 100 100 100 100 100 100 100 100 100 100 100 2 0 0 4 93 71 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0", "Unknown", 1)]
@@ -204,6 +205,20 @@ public class WhistleTests
         Assert.InRange(stop.Time, 0.7 + WhistleTiming.Default.QuietEnds, 0.7 + WhistleTiming.Default.QuietEnds + 0.1);
     }
 
+    private static void WithCulture(CultureInfo culture, Action body)
+    {
+        var previous = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = culture;
+        try
+        {
+            body();
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
+    }
+
     [Fact]
     public void TimingsAreKeptInOrder()
     {
@@ -212,5 +227,22 @@ public class WhistleTests
         Assert.True(t.Shortest <= t.ShortestLong);
         Assert.True(t.QuietEnds > t.Bounce);
         Assert.InRange(t.Dip, 0.1, 0.9);
+    }
+
+    [Theory]
+    [InlineData("de-DE")]
+    [InlineData("tr-TR")]
+    public void HeardAndTraceStayInvariantUnderNonEnglishCultures(string cultureName)
+    {
+        WithCulture(CultureInfo.GetCultureInfo(cultureName), () =>
+        {
+            var ear = new Ear().Quiet(0.5).Blow(2.4, 0.6).Blow(0.7, 0.5).Quiet();
+            var odd = ear.Signals.Single();
+            Assert.Equal(WhistleSignal.Unknown, odd.Signal);
+            Assert.Equal("long 2.40 s, short 0.70 s", odd.Heard);
+            var trace = ear.Reader.Trace.Split(' ').Select(s => int.Parse(s, CultureInfo.InvariantCulture)).ToList();
+            Assert.Equal(0, trace[0]);
+            Assert.Contains(100, trace);
+        });
     }
 }

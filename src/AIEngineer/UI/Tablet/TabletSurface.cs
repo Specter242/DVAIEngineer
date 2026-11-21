@@ -60,15 +60,16 @@ namespace AIEngineer.UI.Tablet
         {
             TabletSkin.Build();
             Current = this;
+            var begun = false;
             try
             {
                 for (var attempt = 0; attempt < 4; attempt++)
                 {
                     Begin();
+                    begun = true;
                     try
                     {
                         draw();
-                        End();
                         return;
                     }
                     catch (Redraw)
@@ -76,12 +77,13 @@ namespace AIEngineer.UI.Tablet
                         pending = null;
                     }
                 }
-                End();
             }
             finally
             {
                 Current = null;
                 pending = null;
+                if (begun)
+                    End();
             }
         }
 
@@ -121,7 +123,8 @@ namespace AIEngineer.UI.Tablet
                 pool.Add(g);
             }
             used++;
-            g.enabled = true;
+            if (!g.enabled)
+                g.enabled = true;
             // Later draws lie over earlier ones.
             if (g.transform.GetSiblingIndex() != order)
                 g.transform.SetSiblingIndex(order);
@@ -169,7 +172,8 @@ namespace AIEngineer.UI.Tablet
             var raw = Node(pictures, ref pictureUsed, "picture");
             if (raw.texture != texture)
                 raw.texture = texture;
-            raw.color = Color.white;
+            if (raw.color != Color.white)
+                raw.color = Color.white;
             Place(raw, r);
         }
 
@@ -187,15 +191,23 @@ namespace AIEngineer.UI.Tablet
                 t.verticalOverflow = VerticalWrapMode.Truncate;
                 t.lineSpacing = 0.95f;
             }
-            t.text = text;
-            t.fontSize = look.Size;
-            t.resizeTextMaxSize = look.Size;
-            t.fontStyle = look.Bold ? FontStyle.Bold : FontStyle.Normal;
-            t.alignment = look.Align;
-            t.horizontalOverflow = HorizontalWrapMode.Wrap;
+            if (t.text != text)
+                t.text = text;
+            if (t.fontSize != look.Size)
+                t.fontSize = look.Size;
+            if (t.resizeTextMaxSize != look.Size)
+                t.resizeTextMaxSize = look.Size;
+            var style = look.Bold ? FontStyle.Bold : FontStyle.Normal;
+            if (t.fontStyle != style)
+                t.fontStyle = style;
+            if (t.alignment != look.Align)
+                t.alignment = look.Align;
+            if (t.horizontalOverflow != HorizontalWrapMode.Wrap)
+                t.horizontalOverflow = HorizontalWrapMode.Wrap;
             var c = look.Text;
             c.a *= alpha;
-            t.color = c;
+            if (t.color != c)
+                t.color = c;
             Place(t, new Rect(r.x + look.PadLeft, r.y, Math.Max(1, r.width - look.PadLeft - look.PadRight), r.height));
         }
 

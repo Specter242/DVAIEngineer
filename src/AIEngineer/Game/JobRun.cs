@@ -62,6 +62,15 @@ namespace AIEngineer.Game
         /// <summary>How much farther a set-out may run to join its job's cars rather than stand alone, m (a last move always joins).</summary>
         private const double JoinPremium = 1000;
 
+        /// <summary>
+        /// How much farther a set-out may run to a free stretch of its track
+        /// rather than couple to the cars standing there and shove them in, m:
+        /// a free stretch disturbs no one, but not at any price (a player's
+        /// report at City South, 2026-11-18: a train went out onto the main
+        /// line to turn, 8.6 to 12.2 km, where shoving in ran 176 to 698 m).
+        /// </summary>
+        private const double SpotPremium = 1000;
+
         /// <summary>How far riders may run to go back where they stood before a nearer track is looked for, m.</summary>
         private const double HomeDetour = 2500;
 
@@ -847,6 +856,18 @@ namespace AIEngineer.Game
                     return Shove(session, track, cars, label, done, joinPlan.Value, joining: true);
                 Main.Log($"jobs: {session.Name}: {label}: joining the job's cars there runs {joinCost:F0} m, the room left {spotCost:F0} m; setting out in the room");
             }
+            // A free stretch, or the cars there shoved in from whichever entry: the one it reaches
+            // cheapest, cars first, but a free stretch unless that is more than a little farther.
+            var shove = CheapestShove(session, track, length, standing, out var shoveCost);
+            if (spot.Count > 0 && shove != null)
+            {
+                var spotCost = RouteCost(session.Read(), spot, carsFirst: true);
+                if (spotCost > shoveCost + SpotPremium)
+                {
+                    Main.Log($"jobs: {session.Name}: {label}: the free stretch runs {spotCost:F0} m, shoving the cars there in {shoveCost:F0} m: shoving them in");
+                    return Shove(session, track, cars, label, done, shove.Value, joining: false, nearer: true);
+                }
+            }
             if (spot.Count > 0)
             {
                 var waypoint = new Waypoint(OrderGoals.OnTrack(world.Graph, track, length), WaypointAction.Uncouple)
@@ -866,8 +887,35 @@ namespace AIEngineer.Game
                 Main.Log($"jobs: {session.Name}: {done.Replace(" set out on ", " to set out on ").Replace(" put back on ", " to put back on ")} ({length:F0} m of cars)");
                 return true;
             }
-            var shove = OrderGoals.ShoveIn(world.Graph, track, length, standing, movable: Movable);
             return shove != null && Shove(session, track, cars, label, done, shove.Value, joining: false);
+        }
+
+        /// <summary>
+        /// The shove-in a set-out onto a track with cars on it would make, by
+        /// the entry its train reaches cheapest, cars first, to couple to them;
+        /// null when neither entry has room. Its cost, m, by the router.
+        /// </summary>
+        private ShovePlan? CheapestShove(Session session, int track, double length, List<OccupiedSpan> standing, out double cost)
+        {
+            cost = double.PositiveInfinity;
+            ShovePlan? best = null;
+            if (standing.Count == 0)
+                return null;
+            var state = session.Read();
+            foreach (var entry in new[] { TrackEnd.Start, TrackEnd.End })
+            {
+                var plan = OrderGoals.ShoveIn(world.Graph, track, length, standing, movable: Movable, entryOnly: entry);
+                if (plan == null)
+                    continue;
+                var reach = RouteCost(state, OrderGoals.ToCouple(world.Graph, new[] { plan.Value.CoupleTo[0] }, world.SelectedBranchFunc), carsFirst: true);
+                // One a route can't reach still stands, as before, when it's the only one.
+                if (best == null || reach < cost)
+                {
+                    best = plan;
+                    cost = reach;
+                }
+            }
+            return best;
         }
 
         /// <summary>
@@ -932,7 +980,7 @@ namespace AIEngineer.Game
         }
 
         /// <summary>Queues a set-out coupled to the cuts standing by the entry, in turn, and shoved in with them as far as the plan says.</summary>
-        private bool Shove(Session session, int track, List<TrainCar> cars, string label, string done, ShovePlan plan, bool joining)
+        private bool Shove(Session session, int track, List<TrainCar> cars, string label, string done, ShovePlan plan, bool joining, bool nearer = false)
         {
             var group = new HashSet<TrainCar>(cars);
             var theirs = 0;
@@ -962,7 +1010,7 @@ namespace AIEngineer.Game
             };
             Queue(session.Engineer, leave);
             setOuts++;
-            Main.Log($"jobs: {session.Name}: {label}: " + (joining ? $"joining the job's {theirs} car{(theirs == 1 ? "" : "s")} there" : $"no clear stretch for {Length(cars):F0} m; coupling to the {theirs} car{(theirs == 1 ? "" : "s")} by the entry ({plan.Owners.Length} cut{(plan.Owners.Length == 1 ? "" : "s")})") +
+            Main.Log($"jobs: {session.Name}: {label}: " + (joining ? $"joining the job's {theirs} car{(theirs == 1 ? "" : "s")} there" : (nearer ? "nearer than the clear stretch: " : $"no clear stretch for {Length(cars):F0} m; ") + $"coupling to the {theirs} car{(theirs == 1 ? "" : "s")} by the entry ({plan.Owners.Length} cut{(plan.Owners.Length == 1 ? "" : "s")})") +
                      (still ? "" : $", shoving them {plan.Shift:F0} m further in"));
             return true;
         }

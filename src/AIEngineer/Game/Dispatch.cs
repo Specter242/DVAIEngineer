@@ -85,6 +85,13 @@ namespace AIEngineer.Game
         private static Network yardsFor;
         private static List<Yard> yards = new List<Yard>();
 
+        /// <summary>Clears cached yard data when the world unloads.</summary>
+        public static void ResetForUnload()
+        {
+            yardsFor = null;
+            yards.Clear();
+        }
+
         /// <summary>The player's own locos.</summary>
         public static List<TrainCar> Locos()
         {

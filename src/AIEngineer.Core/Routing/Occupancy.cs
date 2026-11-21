@@ -137,7 +137,7 @@ namespace AIEngineer.Core.Routing
             return false;
         }
 
- public void MarkMoving(int owner)
+        public void MarkMoving(int owner)
         {
             moving.Add(owner);
             stampStale = true;
@@ -171,7 +171,7 @@ namespace AIEngineer.Core.Routing
             }
         }
 
- public bool IsOccupiedBy(int track, double from, double to, int owner)
+        public bool IsOccupiedBy(int track, double from, double to, int owner)
         {
             if (!byTrack.TryGetValue(track, out var list))
                 return false;

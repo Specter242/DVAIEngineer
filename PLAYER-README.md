@@ -17,6 +17,13 @@ so when it takes the loco. On stock steam the engineer fires it itself:
 coal into the firebox as the work asks, the injector for the water, the
 blower while it stands.
 
+To fire it yourself, press **Fire: crew** on the loco's card on the Engineers
+page so it reads **Fire: you**. The engineer then drives and leaves the fire,
+water, blower, and damper to you, and gives Realistic Firing's fireman no
+orders. It tells you if the fire goes out or the steam or water runs low. With
+no steam left, or the water out of sight in the glass, it stops and holds the
+train, and carries on by itself once you've put that right.
+
 ## Giving orders
 
 - **The engineer's tablet.** A tablet you hold, or fit to a large gadget
@@ -37,7 +44,9 @@ blower while it stands.
     cut of cars, or a loco: its orders come up at the bottom (Go to, cars
     first or loco first, or Stop here; Couple on either end; Work a job its cars belong
     to; Back or Ahead by car lengths), Now or After its orders.
-  - **Engineers:** what each is doing and its orders, each with ✕; Give
+  - **Engineers:** your own locos, those with engineers, and the loco
+    you're on with those coupled to it (a button at the top gives it
+    orders); what each is doing and its orders, each with ✕; Give
     orders, Stop, Hand back; **Fuel** sends it to the nearest service
     station selling what it runs on (diesel, coal or water, charge), and
     **Service** to the nearest that repairs, loco end first, stopped over
@@ -106,17 +115,39 @@ blower while it stands.
 It keeps to the posted speed limits (and a cap on yard tracks), never
 throws a switch with a car on it, never plans a way through standing cars
 or past cars left too near a switch (about 35 m from the points), and backs
-a train through a switchback when that's the way in. If its wheels slip it
-eases off and sands.
+a train through a switchback when that's the way in. It opens the throttle
+about a notch at a time. If its wheels slip it eases off, sands, and feels
+its way back up. It eases the throttle as the traction motors get hot,
+and if their fuse is off it shuts off, holds the train, and tells you: reset
+the fuse in the cab and it carries on.
 
 **Stopping it.** **Stop** (Engineers page) and **Stop here** (a loco's
 orders on the map) end whatever it is doing, a job run included, and hold
 the train; **Hand back** also gives the controls back. Taking a lever yourself, aboard
-the train or with a remote paired to the loco, hands it straight to you. A
+the train or with a remote paired to the loco, hands it straight to you,
+and the message says which lever. Stepping into the cab doesn't count,
+even where a lever springs into a notch as the cab loads. A
 train that stands five minutes on one order tells you what it is waiting
-on. If the end
+on. If it can't get the train moving, or can't keep it moving, after a
+fair try, it tells you why if it can (the wheels slipping on wet rail, or
+the train too heavy for it on the grade), drops its orders, and holds the
+train on its brakes until you give it another. If the end
 of a cut you asked for can't be reached without going through the cars, it
 couples on the other end and tells you.
+
+## The conductor
+
+For the train you drive yourself. Aboard it, open the map, press a track,
+and choose **Conductor: route here**. The **Conductor** tab shows the plan:
+where to, how far, how many reversals, which end leads, the switches to be
+thrown, and anything in the way; the route is drawn on the map. Nothing on
+the railroad changes yet. Press **Execute** and drive: the conductor lines
+the switches ahead of the train and tells you when to stop and reverse, on
+the tab and in the game's notifications. It never touches the throttle,
+brakes, or reverser. A switch you throw the other way stays as you left it;
+the conductor plans around it and says so. On arrival it tells you it's
+done. **Stand down** ends it at any time and leaves the switches as they lie.
+A train has an engineer or a conductor, not both.
 
 ## With Realistic Brakes
 
@@ -134,7 +165,8 @@ when it is installed:
 
 - **Driving:** top speed on runs, speed for yard moves, the speed cap on
   yard tracks (read when a save loads), how far short of standing cars it
-  stops, and whether it starts a shut-down loco.
+  stops, whether it starts a shut-down loco, and whether new engineers on
+  steam locos leave the firing to you.
 - **Braking:** how hard it plans to brake with cars, running light, and
   with cars on Realistic Brakes.
 - **Display:** notifications.

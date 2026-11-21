@@ -60,4 +60,33 @@ public class SpeedPlannerTests
         Assert.Equal(0, planner.TargetSpeed(510, 20, 500, Gentle));
         Assert.Equal(20, planner.TargetSpeed(0, 20, 5000, Gentle));
     }
+
+    [Fact]
+    public void SpeedToMeetNeverDipsBelowANonzeroLimit()
+    {
+        var slowAir = new BrakingModel(0.12, 10);
+        foreach (var model in new[] { Gentle, new BrakingModel(0.25, 4), slowAir })
+        {
+            const double limit = 10;
+            var prev = model.SpeedToMeet(limit, 0);
+            Assert.Equal(limit, prev, 6);
+            foreach (var d in new[] { 0.001, 0.1, 1.0, 5.0, 20.0, 40.0, 100.0, 500.0 })
+            {
+                var v = model.SpeedToMeet(limit, d);
+                Assert.True(v >= limit, $"d={d}: {v} dipped below limit {limit}");
+                Assert.True(v >= prev - 1e-12, $"d={d}: {v} decreased below {prev}");
+                prev = v;
+            }
+            // Approaching a stop (limit 0) stays continuous down to 0 and matches DistanceToSlow.
+            var stopPrev = model.SpeedToMeet(0, 0);
+            Assert.Equal(0, stopPrev, 6);
+            foreach (var d in new[] { 0.001, 1.0, 25.0, 200.0 })
+            {
+                var v = model.SpeedToMeet(0, d);
+                Assert.True(v > stopPrev);
+                Assert.Equal(d, model.DistanceToSlow(v, 0), 6);
+                stopPrev = v;
+            }
+        }
+    }
 }

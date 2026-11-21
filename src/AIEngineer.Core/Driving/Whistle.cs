@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace AIEngineer.Core.Driving
 {
- public enum WhistleSignal
+    public enum WhistleSignal
     {
         /// <summary>Two long: release brakes and proceed.</summary>
         Go,
@@ -22,7 +23,7 @@ namespace AIEngineer.Core.Driving
         Unknown,
     }
 
- public struct WhistleTiming
+    public struct WhistleTiming
     {
         /// <summary>A dip shorter than this inside a blast is the cord bouncing or a quill: the blast goes on.</summary>
         public double Bounce;
@@ -61,7 +62,7 @@ namespace AIEngineer.Core.Driving
         }
     }
 
- public sealed class WhistleReader
+    public sealed class WhistleReader
     {
         /// <summary>From quiet, a blast starts above this loudness.</summary>
         public const double Sounds = 0.15;
@@ -214,12 +215,12 @@ namespace AIEngineer.Core.Driving
             var kinds = blasts.ConvertAll(Kind);
             var words = new List<string>(blasts.Count);
             for (var i = 0; i < blasts.Count; i++)
-                words.Add($"{(kinds[i] == Blast.Short ? "short" : "long")} {blasts[i]:F2} s");
+                words.Add(string.Format(CultureInfo.InvariantCulture, "{0} {1:F2} s", kinds[i] == Blast.Short ? "short" : "long", blasts[i]));
             Heard = string.Join(", ", words);
             var from = Math.Max(signalFrom < 0 ? 0 : signalFrom, sampled - SampleCount);
             var trace = new StringBuilder((sampled - from) * 4);
             for (var i = from; i < sampled; i++)
-                trace.Append(i > from ? " " : "").Append(samples[i % SampleCount]);
+                trace.Append(i > from ? " " : "").Append(samples[i % SampleCount].ToString(CultureInfo.InvariantCulture));
             Trace = trace.ToString();
             blasts.Clear();
             signalFrom = -1;

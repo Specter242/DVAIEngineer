@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace AIEngineer.UI
 {
- internal static class WhistleMenu
+    internal static class WhistleMenu
     {
         private sealed class Row
         {

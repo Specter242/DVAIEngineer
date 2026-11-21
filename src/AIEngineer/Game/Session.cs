@@ -33,6 +33,7 @@ namespace AIEngineer.Game
         private float lastStartAttempt = float.NegativeInfinity;
         private int startAttempts;
         private bool standing;
+        private bool fuseTold;
         private bool easedNoted;
         private bool prepared;
         private bool keeping;
@@ -43,15 +44,22 @@ namespace AIEngineer.Game
             Loco = loco;
             this.world = world;
             Engineer = new Engineer(settings);
+            Conductor = new Conductor(settings);
             Controls = new LocoControls(loco);
             lastTick = Time.time;
             Unsupported = WhyUnsupported(loco);
             Steam = SteamCrew.For(loco);
             Controls.Steam = Steam != null;
+            if (Steam != null)
+                Steam.PlayerFires = Main.Settings.PlayerFiresNewEngineers;
+            Motors = TractionMotors.For(loco);
         }
 
         /// <summary>A steam loco's fire, water, and cylinder cocks; null for any other loco.</summary>
         public SteamCrew Steam { get; }
+
+        /// <summary>A loco's traction motors; null for one without.</summary>
+        public TractionMotors Motors { get; }
 
         /// <summary>Working as a helper on a doubleheaded train, from the lead's whistle and levers; null otherwise.</summary>
         public Helper Helper { get; private set; }
@@ -85,6 +93,12 @@ namespace AIEngineer.Game
         public TrainCar Loco { get; }
 
         public Engineer Engineer { get; }
+
+        /// <summary>The player's conductor, when it is on this loco's train (<see cref="ConductorDesk"/>).</summary>
+        public Conductor Conductor { get; }
+
+        /// <summary>Whether the conductor is following the train: it then wants ticks and the cars' places.</summary>
+        public bool ConductorWorking => Conductor.State == ConductorState.Executing;
 
         public LocoControls Controls { get; }
 
@@ -180,7 +194,60 @@ namespace AIEngineer.Game
 
         public void Dispose()
         {
+            Conductor.StandDown();
             Stop(secure: false);
+        }
+
+        private int? conductorTrain;
+
+        /// <summary>
+        /// A tick of the conductor: reads the train, and tells the player
+        /// what it has to say. It goes nowhere near the engineer's path, which
+        /// starts engines, releases brakes, and works the controls. Whatever
+        /// goes wrong here stands the conductor down and leaves the train alone.
+        /// </summary>
+        public void TickConductor(float now)
+        {
+            var dt = Mathf.Clamp(now - lastTick, 0f, 1f);
+            lastTick = now;
+            try
+            {
+                if (Loco == null)
+                    return;
+                if (!MultiplayerGate.MayDrive)
+                {
+                    StandConductorDown("only the host has a conductor in multiplayer");
+                    return;
+                }
+                var state = Read();
+                // A coupling or a cut gives the train a new id: its switch holds go with it.
+                if (conductorTrain.HasValue && state.Owner != 0 && conductorTrain.Value != state.Owner)
+                    world.HandOn(conductorTrain.Value, state.Owner);
+                if (state.Owner != 0)
+                    conductorTrain = state.Owner;
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                var route = Conductor.Route;
+                Conductor.Tick(dt, state, world);
+                var ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                SlowestTickMs = Math.Max(SlowestTickMs, ms);
+                if (ms > SlowTickMs)
+                    Main.Warn($"{Name}: conductor tick took {ms:F1} ms ({(Conductor.Route != route ? "planned a route" : "no new route")})");
+                while (Conductor.TryTakeNotice(out var call))
+                    Main.Notify($"Conductor: {ConductorDesk.Say(Conductor, call)}.");
+            }
+            catch (Exception e)
+            {
+                Main.Error($"The conductor on {Name} failed and has stood down", e);
+                StandConductorDown("it hit an error");
+            }
+        }
+
+        /// <summary>Stands the conductor down and says why.</summary>
+        public void StandConductorDown(string why)
+        {
+            Conductor.StandDown();
+            conductorTrain = null;
+            Main.Notify($"Conductor: stood down: {why}.");
         }
 
         /// <summary>Runs at a set speed toward the loco's front, or its back.</summary>
@@ -295,13 +362,17 @@ namespace AIEngineer.Game
                 Main.Notify($"AI engineer: {Name}'s controls can't be worked from here.");
                 return;
             }
+            var settled = Controls.WatchCab(now);
+            if (settled != null)
+                Main.Log($"{Name}: its cab settled the {settled} (not your hand)");
             var moved = Controls.MovedByAnother(now);
             if (moved != null)
             {
                 if (PlayerAtControls())
                 {
+                    Main.Log($"{Name}: handed back: the {moved} moved, {Controls.Movement(moved)}");
                     Stop(secure: false);
-                    Main.Notify($"AI engineer: you have {Name}'s controls.");
+                    Main.Notify($"AI engineer: you moved {Name}'s {moved}, so its controls are yours.");
                     return;
                 }
                 if (Controls.OnlyThrottleEased(now))
@@ -356,14 +427,16 @@ namespace AIEngineer.Game
             // While a job run's next moves are planned on another thread the train stands: an
             // order waiting behind the run mustn't set off in between. Read afresh each tick, so
             // a run that ends or is canceled can't leave the engineer held.
-            Engineer.Holding = Jobs != null && Jobs.Planning ? "Planning the jobs' next moves" : Steam?.Waiting(standing);
+            Engineer.Holding = WatchTheFuse(state)
+                ? TractionMotors.FuseStatus
+                : Jobs != null && Jobs.Planning ? "Planning the jobs' next moves" : Steam?.Waiting(standing);
             if (Steam != null && !steamNoted)
             {
                 steamNoted = true;
-                var note = Steam.Note;
+                var note = Steam.PlayerFires ? "you're firing: the engineer leaves the fire and the water to you" : Steam.Note;
                 if (note != null)
-                    Main.Notify($"AI engineer: {Name}: {note}.");
-                Main.Log($"{Name}: steam, {(Steam.Realistic ? "fired by Realistic Firing's fireman" : "fired by the engineer")}, {Steam.Pressure:F1} bar");
+                    Tell(note);
+                Main.Log($"{Name}: steam, {(Steam.PlayerFires ? "fired by the player" : Steam.Realistic ? "fired by Realistic Firing's fireman" : "fired by the engineer")}, {Steam.Pressure:F1} bar");
             }
             var before = Engineer.Route;
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -392,11 +465,11 @@ namespace AIEngineer.Game
                 }
             }
             LogWaits(state);
+            if (Engineer.TakeGiveUp(out var cause, out var grade, out var underWay))
+                CantMoveIt(cause, grade, underWay);
             if (Engineer.Note != null)
             {
-                LastNote = Engineer.Note;
-                Main.Notify($"AI engineer: {Name}: {Engineer.Note}.");
-                Main.Log($"{Name}: {Engineer.Note}");
+                Tell(Engineer.Note);
                 Engineer.Note = null;
             }
             if (Engineer.LogNote != null)
@@ -423,14 +496,7 @@ namespace AIEngineer.Game
             {
                 var stopAhead = Engineer.Route != null ? Math.Max(0, Engineer.StopAt - Engineer.Progress) : double.PositiveInfinity;
                 var road = Engineer.Mode == EngineerMode.Road || (Engineer.Route != null && Engineer.Route.Length > 2000);
-                try
-                {
-                    Steam.Tick(now, (float)output.Controls.Throttle, standing, state.SpeedTowardA, stopAhead, road);
-                }
-                catch (Exception e)
-                {
-                    Main.Warn($"{Name}: its fire couldn't be seen to: {e.GetBaseException().Message}");
-                }
+                TickSteam(now, (float)output.Controls.Throttle, state.SpeedTowardA, stopAhead, road);
             }
 
             if (output.ReleaseHandbrakes)
@@ -512,9 +578,19 @@ namespace AIEngineer.Game
                 return;
             }
             var regulator = Helper.Tick(now, standing, state.SpeedTowardA);
+            if (Steam != null)
+                TickSteam(now, regulator, state.SpeedTowardA, double.PositiveInfinity, road: true);
+        }
+
+        /// <summary>The fire and the water seen to, and a firing player told what they need to know.</summary>
+        private void TickSteam(float now, float regulator, double speed, double stopAhead, bool road)
+        {
             try
             {
-                Steam?.Tick(now, regulator, standing, state.SpeedTowardA, double.PositiveInfinity, road: true);
+                Steam.Tick(now, regulator, standing, speed, stopAhead, road);
+                var warning = Steam.NextWarning(now);
+                if (warning != null)
+                    Tell(warning);
             }
             catch (Exception e)
             {
@@ -522,9 +598,57 @@ namespace AIEngineer.Game
             }
         }
 
+        /// <summary>
+        /// The engineer gave up on moving its train: the player is told
+        /// which loco, that it can't start or keep the train moving here,
+        /// and why as far as it knows; a job run ends with it.
+        /// </summary>
+        private void CantMoveIt(CantMove cause, double grade, bool underWay)
+        {
+            if (Jobs != null)
+            {
+                Jobs.Cancel(this, "it couldn't move the train");
+                Jobs = null;
+            }
+            var tonnes = 0f;
+            var set = Loco.trainset;
+            if (set != null)
+                foreach (var car in set.cars)
+                    if (car != null && car.massController != null)
+                        tonnes += car.massController.TotalMass / 1000f;
+            var on = grade >= 0.003 ? $"a {grade * 100:F1} % grade" : "the level";
+            var wet = Weather.Wetness() > 0.3f;
+            // Not slipping and no grade to speak of: no loco is beaten by its train on the level,
+            // so something holds it (a DE2 and 198 t under Realistic Brakes, 2026-11-19).
+            if (cause == CantMove.Power && grade < 0.005)
+                cause = CantMove.Unknown;
+            var why = cause == CantMove.Grip ? $"the wheels slip{(wet ? " on the wet rail" : "")} with {tonnes:F0} t on {on}"
+                : cause == CantMove.Power ? $"{tonnes:F0} t is too heavy for it on {on}"
+                : "it won't move under power, so something is holding it: a hand brake on, or a brake that won't come off?";
+            var help = cause == CantMove.Unknown ? "" : ", perhaps with fewer cars";
+            Tell($"can't {(underWay ? "keep the train moving" : "get the train moving")} here: {why}. It's holding the train on its brakes; give it another order to try again{help}");
+        }
+
+        private void Tell(string note)
+        {
+            LastNote = note;
+            Main.Notify($"AI engineer: {Name}: {note}.");
+            Main.Log($"{Name}: {note}");
+        }
+
+        /// <summary>Whether the traction motors' fuse is off with the engine running: the player is told once each time.</summary>
+        private bool WatchTheFuse(TrainState state)
+        {
+            var off = Motors != null && state.CanMove && Motors.FuseOff;
+            if (off && !fuseTold)
+                Tell(Motors.FuseNote);
+            fuseTold = off;
+            return off;
+        }
+
         private Waypoint routeLoggedFor;
 
- private void LogFirstRoute(TrainState state)
+        private void LogFirstRoute(TrainState state)
         {
             var head = Engineer.Queue.Count > 0 ? Engineer.Queue[0] : null;
             var route = Engineer.Route;
@@ -619,13 +743,17 @@ namespace AIEngineer.Game
                 foreach (var sw in route.Legs[Engineer.LegIndex].Switches)
                     b.Append($"\n  switch {sw.Junction} wanted {sw.Branch} at {sw.AtDistance:F0} m, lies {world.SelectedBranch(sw.Junction)}");
             }
-            foreach (var car in CarSpawner.Instance.AllCars)
+            var spawner = CarSpawner.Instance;
+            if (spawner != null)
             {
-                if (car == null || car.trainset == Loco.trainset)
-                    continue;
-                var d = Vector3.Distance(car.transform.position, Loco.transform.position);
-                if (d < 60)
-                    b.Append($"\n  {car.ID} {d:F0} m away, set {car.trainset?.id}, derailed {car.derailed}, front on {car.FrontBogie?.track?.name}, rear on {car.RearBogie?.track?.name}");
+                foreach (var car in spawner.AllCars)
+                {
+                    if (car == null || car.trainset == Loco.trainset)
+                        continue;
+                    var d = Vector3.Distance(car.transform.position, Loco.transform.position);
+                    if (d < 60)
+                        b.Append($"\n  {car.ID} {d:F0} m away, set {car.trainset?.id}, derailed {car.derailed}, front on {car.FrontBogie?.track?.name}, rear on {car.RearBogie?.track?.name}");
+                }
             }
             Main.Warn(b.ToString());
             if (!derailed)
@@ -675,6 +803,14 @@ namespace AIEngineer.Game
                 }
             }
             state.LocoMassShare = mass > 0 ? locoMass / mass : 0;
+            state.RiseTowardA = length > 1 ? (endA.transform.position.y - endB.transform.position.y) / length : 0;
+            state.MotorHeat = Motors?.Temperature ?? 0;
+            state.MotorAmpsShare = Motors?.AmpsShare ?? 0;
+            var grip = Loco.SimController != null ? Loco.SimController.wheelslipController : null;
+            state.GripShare = grip != null && grip.DrivingForce != null && grip.TotalForceLimit > 1f
+                ? Math.Abs(grip.DrivingForce.generatedForce) / grip.TotalForceLimit
+                : 0;
+            state.Steam = Steam != null;
             var v = endA.train.GetForwardSpeed();
             state.SpeedTowardA = endA.isFrontCoupler ? v : -v;
             state.Length = length;
@@ -687,7 +823,8 @@ namespace AIEngineer.Game
             state.PowerAtFarEnd = IsPower(set.cars[state.LocoEnd == ConsistEnd.A ? set.cars.Count - 1 : 0]);
             state.Owner = set.id;
             state.OnTrack = onTrack;
-            state.CanMove = Controls.EngineRunning;
+            // A fire gone out stops nothing while there is steam, and it is a firing player's to light.
+            state.CanMove = Controls.EngineRunning || (Steam != null && Steam.PlayerFires);
             var brakeset = Loco.brakeSystem?.brakeset;
             // A light engine brakes on its independent; one with no independent has only the train brake.
             var hasTrainBrake = Controls.HasTrainBrakeControl && brakeset != null && (brakeset.cars.Count > 1 || !Controls.HasLocoBrake);
@@ -738,10 +875,13 @@ namespace AIEngineer.Game
         }
 
         /// <summary>Takes the hand brakes off the train's own cars, the engineer's to drive now.</summary>
-        private void ReleaseHandbrakes()
+        internal void ReleaseHandbrakes()
         {
+            var set = Loco != null ? Loco.trainset : null;
+            if (set == null)
+                return;
             var released = 0;
-            foreach (var car in Loco.trainset.cars)
+            foreach (var car in set.cars)
             {
                 var brakes = car != null ? car.brakeSystem : null;
                 if (brakes == null || !brakes.hasHandbrake || brakes.handbrakePosition <= 0.01f)
@@ -767,14 +907,19 @@ namespace AIEngineer.Game
             return c;
         }
 
-        private Coupler EndCoupler(ConsistEnd end) => Loco.trainset.GetEndmost(end == ConsistEnd.A);
+        private Coupler EndCoupler(ConsistEnd end)
+        {
+            var set = Loco != null ? Loco.trainset : null;
+            return set != null ? set.GetEndmost(end == ConsistEnd.A) : null;
+        }
 
         private void Couple(ConsistEnd end)
         {
+            var set = Loco != null ? Loco.trainset : null;
             var coupler = EndCoupler(end);
-            if (coupler.IsCoupled())
+            if (set == null || coupler == null || coupler.IsCoupled())
                 return;
-            var was = Loco.trainset.id;
+            var was = set.id;
             CouplerLogic.CoupleFirstInRange(coupler, 1.5f, releaseHandbrakesOnCoupledCars: true);
             if (!coupler.IsCoupled())
                 return;
@@ -795,7 +940,7 @@ namespace AIEngineer.Game
         /// </summary>
         private void TrainChanged(int was)
         {
-            var now = Loco.trainset != null ? Loco.trainset.id : was;
+            var now = Loco != null && Loco.trainset != null ? Loco.trainset.id : was;
             if (now != was)
                 world.HandOn(was, now);
             world.ScanCars();
@@ -808,12 +953,18 @@ namespace AIEngineer.Game
         /// </summary>
         private void Cut(CutRequest cut)
         {
-            var set = Loco.trainset;
+            var set = Loco != null ? Loco.trainset : null;
+            if (set == null)
+                return;
             var was = set.id;
             var locoIndex = set.cars.IndexOf(Loco);
+            if (locoIndex < 0)
+                return;
             // cars[0] is end A's car: the far end is whichever has more cars between it and the loco.
             var fromA = locoIndex >= set.cars.Count - 1 - locoIndex;
             var c = set.GetEndmost(fromA);
+            if (c == null)
+                return;
             var cars = new List<TrainCar>();
             for (var i = 0; i < cut.Cars; i++)
             {
@@ -857,11 +1008,13 @@ namespace AIEngineer.Game
         public List<TrainCar> OtherSide()
         {
             var list = new List<TrainCar>();
-            var set = Loco.trainset;
+            var set = Loco != null ? Loco.trainset : null;
             if (set == null)
                 return list;
             var cars = set.cars;
             var locoIndex = cars.IndexOf(Loco);
+            if (locoIndex < 0)
+                return list;
             var fromA = locoIndex >= cars.Count - 1 - locoIndex;
             if (fromA)
             {
@@ -879,6 +1032,9 @@ namespace AIEngineer.Game
         /// <summary>Uncouples every car on the loco's other side (<see cref="OtherSide"/>), hand brakes on if asked; how many came off.</summary>
         public int CutOtherSide(bool setHandbrakes)
         {
+            var set = Loco != null ? Loco.trainset : null;
+            if (set == null)
+                return 0;
             var cars = OtherSide();
             if (cars.Count == 0)
                 return 0;
@@ -887,7 +1043,7 @@ namespace AIEngineer.Game
                 : Loco.rearCoupler != null && Loco.rearCoupler.coupledTo?.train == next ? Loco.rearCoupler : null;
             if (coupler == null)
                 return 0;
-            var was = Loco.trainset.id;
+            var was = set.id;
             Uncouple(coupler);
             if (setHandbrakes)
             {

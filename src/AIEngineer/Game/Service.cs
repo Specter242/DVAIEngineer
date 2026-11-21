@@ -34,6 +34,13 @@ namespace AIEngineer.Game
         private static Network stationsFor;
         private static readonly List<Station> stations = new List<Station>();
 
+        /// <summary>Clears cached service station data when the world unloads.</summary>
+        public static void ResetForUnload()
+        {
+            stationsFor = null;
+            stations.Clear();
+        }
+
         /// <summary>Every station seen so far on this network, read again as more of the world loads.</summary>
         public static IReadOnlyList<Station> Stations(Network network)
         {

@@ -31,6 +31,9 @@ namespace AIEngineer.AdapterCheck
             Check(AccessTools.Field(typeof(CommsRadioController), "allModes") != null, "CommsRadioController.allModes exists");
             Check(AccessTools.Method(typeof(CommsRadioController), "Awake") != null, "CommsRadioController.Awake exists");
             Check(typeof(Junction).GetField("selectedBranch") != null, "Junction.selectedBranch exists");
+            Check(AIEngineer.Game.TractionMotors.TemperatureField != null && AIEngineer.Game.TractionMotors.FuseField != null, "the traction motors' temperature and fuse exist");
+            Check(AIEngineer.Game.TractionMotors.MaxAmpsField != null && AIEngineer.Game.TractionMotors.GeneratorAmpsField != null, "the traction generator's current and limit exist");
+            Check(AccessTools.Field(typeof(LocoSim.Implementations.Boiler), "crownSheetNormalizedWaterLevel") != null, "the boiler's crown sheet level exists");
             AppDomain.CurrentDomain.AssemblyResolve += Resolve;
             CheckLoads(AccessTools.DeclaredMethod(typeof(StartingItemsController), "InstantiateItem"), "the game's saved-item loader");
             CheckLoads(AccessTools.EnumeratorMoveNext(AccessTools.DeclaredMethod(typeof(GlobalShopController), "InstantiatePurchasedItems")), "the game's purchased-item loader");
@@ -179,7 +182,7 @@ namespace AIEngineer.AdapterCheck
             public static bool SetCall(TrainCar loco, string call) => false;
         }
 
- private static void CheckGivenKey()
+        private static void CheckGivenKey()
         {
             var key = EngineerTabletStartingItems.GivenKey;
             var prefabName = AccessTools.Field(typeof(InventoryItemSpec), "itemPrefabName");
@@ -272,6 +275,8 @@ namespace AIEngineer.AdapterCheck
                     return;
                 }
                 Check(AIEngineer.Game.SteamCrew.Bindable(api) != null, "Realistic Firing's fireman API binds");
+                var readings = assembly.GetType("RealisticFiring.Api", false);
+                Console.WriteLine($"     its readings: {(AIEngineer.Game.SteamCrew.ReadEntry(readings) != null ? "bound (whether the fire is lit, for a firing player)" : "not there (no warning of a fire gone out)")}");
                 var callOf = AIEngineer.Game.SteamCrew.Entry(api, "CallOf", typeof(string)) != null;
                 Console.WriteLine($"     its CallOf: {(callOf ? "bound (his call put back as it was)" : "not there (his call put back as none)")}");
             }
@@ -350,18 +355,74 @@ namespace AIEngineer.AdapterCheck
         }
 
 #if PUBLIC_RELEASE
-        /// <summary>The public release holds no developer setting, test hook, whistle menu, or self-test (owner, 2026-11-17).</summary>
         private static void CheckNoDeveloperTools()
         {
+            const BindingFlags AnyDeclared = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
             var assembly = typeof(Settings).Assembly;
             var saved = DeveloperFields.Where(f => typeof(Settings).GetField(f, BindingFlags.Public | BindingFlags.Instance) != null
                 || typeof(Settings).GetProperty(f, BindingFlags.Public | BindingFlags.Instance)?.CanWrite == true).ToArray();
             Check(saved.Length == 0, $"no developer setting is a saved or drawn setting{(saved.Length > 0 ? ": " + string.Join(", ", saved) : "")}");
             var types = new[] { "AIEngineer.UI.WhistleMenu", "AIEngineer.Diagnostics.SelfTest", "AIEngineer.SettingsDrawer" }.Where(t => assembly.GetType(t, false) != null).ToArray();
             Check(types.Length == 0, $"no whistle menu, settings drawer, or self-test{(types.Length > 0 ? ": " + string.Join(", ", types) : "")}");
-            var hooks = assembly.GetTypes().SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-                .Where(m => m.Name.EndsWith("ForTest", StringComparison.Ordinal) || m.Name == "HitInPlace").Select(m => $"{m.DeclaringType.Name}.{m.Name}").ToArray();
-            Check(hooks.Length == 0, $"no test hooks{(hooks.Length > 0 ? ": " + string.Join(", ", hooks) : "")}");
+
+            var members = assembly.GetTypes()
+                .SelectMany(t =>
+                    t.GetMethods(AnyDeclared).Where(m => !m.IsSpecialName).Cast<MemberInfo>()
+                        .Concat(t.GetFields(AnyDeclared))
+                        .Concat(t.GetProperties(AnyDeclared)))
+                .ToArray();
+
+            var guardedMembers = new (string TypeName, string MemberName, MemberTypes Kind)[]
+            {
+                ("AIEngineer.Main", "LastNotified", MemberTypes.Field),
+                ("AIEngineer.Host", "drawer", MemberTypes.Field),
+                ("AIEngineer.Settings", "ShowDeveloper", MemberTypes.Field),
+                ("AIEngineer.Settings", "DeveloperShown", MemberTypes.Property),
+                ("AIEngineer.Settings", "MoveOldWhistle", MemberTypes.Method),
+                ("AIEngineer.Settings", "WhistleShortest", MemberTypes.Field),
+                ("AIEngineer.Settings", "WhistleShortestLong", MemberTypes.Field),
+                ("AIEngineer.Settings", "WhistleQuietEnds", MemberTypes.Field),
+                ("AIEngineer.Settings", "WhistleBounce", MemberTypes.Field),
+                ("AIEngineer.Settings", "WhistleDip", MemberTypes.Field),
+                ("AIEngineer.Settings", "WhistleVersion", MemberTypes.Field),
+                ("AIEngineer.Game.BookletRenderer", "PaperReplaced", MemberTypes.Field),
+                ("AIEngineer.Game.ConductorDesk", "LocoForTest", MemberTypes.Field),
+                ("AIEngineer.Game.SteamCrew", "GlassAt", MemberTypes.Method),
+                ("AIEngineer.Game.SteamCrew", "GlassReadForTest", MemberTypes.Property),
+                ("AIEngineer.Game.SteamCrew", "FireLitForTest", MemberTypes.Property),
+                ("AIEngineer.Held.EngineerTabletScreen", "PressSlotForTest", MemberTypes.Method),
+                ("AIEngineer.Held.EngineerTabletScreen", "HitInPlace", MemberTypes.Method),
+                ("AIEngineer.UI.Tablet.TabletMap", "OpenForTest", MemberTypes.Method),
+                ("AIEngineer.UI.Tablet.TabletMap", "PickTrackForTest", MemberTypes.Method),
+                ("AIEngineer.UI.Tablet.TabletMap", "DoForTest", MemberTypes.Method),
+                ("AIEngineer.UI.Tablet.TabletMap", "PickForTest", MemberTypes.Method),
+                ("AIEngineer.UI.Tablet.TabletPages", "FireButtons", MemberTypes.Field),
+                ("AIEngineer.UI.Tablet.TabletPages", "OnButtonFor", MemberTypes.Field),
+                ("AIEngineer.UI.Tablet.TabletPages", "OnButton", MemberTypes.Field),
+                ("AIEngineer.UI.Tablet.TabletPages", "Cards", MemberTypes.Field),
+                ("AIEngineer.UI.Tablet.TabletUi", "RefreshForTest", MemberTypes.Method),
+                ("AIEngineer.UI.Tablet.TabletUi", "UndoForTest", MemberTypes.Method),
+            };
+            var guardedKeys = new HashSet<(string, string, MemberTypes)>(guardedMembers);
+            foreach (var (typeName, memberName, kind) in guardedMembers)
+            {
+                var found = members
+                    .Where(m => string.Equals(m.DeclaringType?.FullName, typeName, StringComparison.Ordinal)
+                        && string.Equals(m.Name, memberName, StringComparison.Ordinal)
+                        && m.MemberType == kind)
+                    .Select(m => $"{m.DeclaringType.FullName}.{m.Name} ({m.MemberType})")
+                    .Distinct()
+                    .ToArray();
+                Check(found.Length == 0, $"no guarded self-test member {typeName}.{memberName} ({kind}){(found.Length > 0 ? ": " + string.Join(", ", found) : "")}");
+            }
+
+            var otherForTest = members
+                .Where(m => m.Name.EndsWith("ForTest", StringComparison.Ordinal)
+                    && !guardedKeys.Contains((m.DeclaringType?.FullName, m.Name, m.MemberType)))
+                .Select(m => $"{m.DeclaringType.FullName}.{m.Name} ({m.MemberType})")
+                .Distinct()
+                .ToArray();
+            Check(otherForTest.Length == 0, $"no other *ForTest methods, fields, or properties{(otherForTest.Length > 0 ? ": " + string.Join(", ", otherForTest) : "")}");
         }
 #endif
 

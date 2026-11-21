@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using AIEngineer.Core.Tracks;
 
@@ -25,6 +26,8 @@ namespace AIEngineer.Core.Routing
         private readonly TrackGraph graph;
         private readonly OccupancyIndex occupancy;
         private readonly Dictionary<int, (int Owner, double Until)> holds = new Dictionary<int, (int, double)>();
+        private readonly Dictionary<int, double> approachBest = new Dictionary<int, double>();
+        private readonly Queue<(int Track, TrackEnd End, double Remaining)> approachQueue = new Queue<(int, TrackEnd, double)>();
 
         public Interlocking(TrackGraph graph, OccupancyIndex occupancy)
         {
@@ -41,7 +44,7 @@ namespace AIEngineer.Core.Routing
             return copy;
         }
 
- public bool CanThrow(int junction, int owner, double now)
+        public bool CanThrow(int junction, int owner, double now)
         {
             if (holds.TryGetValue(junction, out var hold) && hold.Owner != owner && hold.Until > now)
                 return false;
@@ -76,9 +79,9 @@ namespace AIEngineer.Core.Routing
             return false;
         }
 
- public void Hold(int junction, int owner, double now) => holds[junction] = (owner, now + HoldSeconds);
+        public void Hold(int junction, int owner, double now) => holds[junction] = (owner, now + HoldSeconds);
 
- public void Reserve(int junction, int owner, double now)
+        public void Reserve(int junction, int owner, double now)
         {
             if (holds.TryGetValue(junction, out var hold) && hold.Owner != owner && hold.Until > now)
                 return;
@@ -131,24 +134,96 @@ namespace AIEngineer.Core.Routing
             return occupancy.IsOccupied(track, at - FoulingDistance, at + FoulingDistance, ignoreOwner);
         }
 
-        /// <summary>Whether another train is moving near the switch's points, on any of its tracks.</summary>
+        /// <summary>Whether another train is moving near the switch's points, on any of its tracks or beyond them within <see cref="ApproachDistance"/>.</summary>
         private bool Approached(int junction, int owner)
         {
             var info = graph.Junction(junction);
-            if (MovingNear(info.StemTrack, info.StemEnd, owner))
+            if (MovingOnEnd(info.StemTrack, info.StemEnd, ApproachDistance, owner))
                 return true;
             foreach (var (track, end) in info.Branches)
             {
-                if (MovingNear(track, end, owner))
+                if (MovingOnEnd(track, end, ApproachDistance, owner))
                     return true;
             }
+
+            var needsWalk = graph.Length(info.StemTrack) < ApproachDistance;
+            if (!needsWalk)
+            {
+                foreach (var (track, _) in info.Branches)
+                {
+                    if (graph.Length(track) < ApproachDistance)
+                    {
+                        needsWalk = true;
+                        break;
+                    }
+                }
+            }
+            if (!needsWalk)
+                return false;
+
+            approachBest.Clear();
+            approachQueue.Clear();
+            approachBest[info.StemTrack * 2 + (int)info.StemEnd] = ApproachDistance;
+            for (var i = 0; i < info.Branches.Length; i++)
+            {
+                var (track, end) = info.Branches[i];
+                approachBest[track * 2 + (int)end] = ApproachDistance;
+            }
+
+            ExpandApproach(info.StemTrack, info.StemEnd, ApproachDistance);
+            for (var i = 0; i < info.Branches.Length; i++)
+            {
+                var (track, end) = info.Branches[i];
+                ExpandApproach(track, end, ApproachDistance);
+            }
+
+            while (approachQueue.Count > 0)
+            {
+                var (track, entered, remaining) = approachQueue.Dequeue();
+                if (approachBest[track * 2 + (int)entered] > remaining)
+                    continue;
+                if (MovingOnEnd(track, entered, remaining, owner))
+                {
+                    approachBest.Clear();
+                    approachQueue.Clear();
+                    return true;
+                }
+                ExpandApproach(track, entered, remaining);
+            }
+            approachBest.Clear();
             return false;
         }
 
-        private bool MovingNear(int track, TrackEnd end, int owner)
+        private void EnqueueApproach(int track, TrackEnd end, double remaining)
         {
-            var at = graph.OffsetOf(track, end);
-            return occupancy.IsMovingWithin(track, at - ApproachDistance, at + ApproachDistance, owner);
+            if (remaining <= 0)
+                return;
+            var key = track * 2 + (int)end;
+            if (approachBest.TryGetValue(key, out var seen) && seen >= remaining)
+                return;
+            approachBest[key] = remaining;
+            approachQueue.Enqueue((track, end, remaining));
+        }
+
+        private void ExpandApproach(int track, TrackEnd entered, double remaining)
+        {
+            var nextRemaining = remaining - graph.Length(track);
+            if (nextRemaining <= 0)
+                return;
+            var links = graph.Links(track, entered.Other());
+            for (var i = 0; i < links.Length; i++)
+            {
+                var link = links[i];
+                EnqueueApproach(link.Track, link.End, nextRemaining);
+            }
+        }
+
+        private bool MovingOnEnd(int track, TrackEnd from, double remaining, int owner)
+        {
+            var length = graph.Length(track);
+            var span = Math.Min(length, remaining);
+            var lo = from == TrackEnd.Start ? 0 : length - span;
+            return occupancy.IsMovingWithin(track, lo, lo + span, owner);
         }
     }
 }

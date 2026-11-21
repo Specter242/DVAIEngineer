@@ -235,7 +235,7 @@ namespace AIEngineer.Held
 
         public string GetCustomDescription() => "AI Engineer's tablet: your engineers, the station booklet's map, and your jobs. " +
             "Press the screen (mouse mode while held on desktop): a track, a cut, or a loco on the map brings up its orders. " +
-            "Hold and move on the map to drag it. It also fits a large gadget mount.";
+            "Use the arrows and zoom buttons to pan and zoom the map. It also fits a large gadget mount.";
     }
 
     /// <summary>Keeps the desktop screen beside the placement ray, independently of zoom (Realistic Firing's FiringTabletHold).</summary>

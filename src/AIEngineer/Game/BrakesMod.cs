@@ -4,7 +4,7 @@ using HarmonyLib;
 
 namespace AIEngineer.Game
 {
- internal static class BrakesMod
+    internal static class BrakesMod
     {
         private static bool looked;
         private static Func<bool> active;

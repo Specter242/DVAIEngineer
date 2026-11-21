@@ -40,7 +40,7 @@ namespace AIEngineer.Diagnostics
             public double Room => Track.Length - 40 - Used - Reserved;
         }
 
- private static IEnumerator Industry(Session s)
+        private static IEnumerator Industry(Session s)
         {
             const string worked = "industry: every job done, by the game's own check";
             const string firstOff = "industry: the cars the loco had uncoupled first, where they stood";
@@ -75,7 +75,9 @@ namespace AIEngineer.Diagnostics
                 var tracks = new List<NamedTrack>();
                 foreach (var t in yard.Tracks)
                 {
-                    if (t.Length < 70 || world.Occupancy.IsOccupied(t.Track, state.Owner))
+                    // Not the loco's own track either: cars spawned there couple to it (after the jobs
+                    // part it stood on OWN-A2D, and part of a job's cut came away with it).
+                    if (t.Length < 70 || world.Occupancy.IsOccupied(t.Track, int.MinValue))
                         continue;
                     if (t.Track != hub && ShuntingCost(world, hub, t.Track) > 2000)
                         continue;

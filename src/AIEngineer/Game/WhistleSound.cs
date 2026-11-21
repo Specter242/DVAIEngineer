@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace AIEngineer.Game
 {
- internal sealed class WhistleSound
+    internal sealed class WhistleSound
     {
         private static readonly AccessTools.FieldRef<LayeredAudioPortReader, Port> ReaderPort =
             AccessTools.FieldRefAccess<LayeredAudioPortReader, Port>("port");

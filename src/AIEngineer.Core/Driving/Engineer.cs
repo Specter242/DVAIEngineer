@@ -60,6 +60,21 @@ namespace AIEngineer.Core.Driving
         /// <summary>Whether a loco's driven wheels are slipping.</summary>
         public bool Slipping;
 
+        /// <summary>The loco's traction motor temperature, °C; 0 if it has none.</summary>
+        public double MotorHeat;
+
+        /// <summary>The lead loco's driving force as a share of the rail's grip; 0 when unknown.</summary>
+        public double GripShare;
+
+        /// <summary>The loco's traction generator current as a share of its limit; 0 if it has none.</summary>
+        public double MotorAmpsShare;
+
+        /// <summary>How much higher end A stands than end B, over the train's length: the grade it stands on toward A.</summary>
+        public double RiseTowardA;
+
+        /// <summary>Whether the loco runs on steam, so there are no motors to rest.</summary>
+        public bool Steam;
+
         public ControlCapabilities Controls;
 
         /// <summary>Whether the air figures below were read: the train has cars with brakes.</summary>
@@ -89,7 +104,7 @@ namespace AIEngineer.Core.Driving
 
         int SelectedBranch(int junction);
 
- bool CanThrow(int junction, int owner);
+        bool CanThrow(int junction, int owner);
 
         /// <summary>
         /// Whether another train's cars stand at rest across the switch's
@@ -106,9 +121,9 @@ namespace AIEngineer.Core.Driving
         /// </summary>
         bool PointsOccupied(int junction);
 
- void Throw(int junction, int branch, int owner);
+        void Throw(int junction, int branch, int owner);
 
- void Reserve(int junction, int owner);
+        void Reserve(int junction, int owner);
     }
 
     /// <summary>Which switches a route may count on, as every route request asks them.</summary>
@@ -240,6 +255,9 @@ namespace AIEngineer.Core.Driving
 
         private readonly List<Waypoint> queue = new List<Waypoint>();
         private readonly SpeedController controller = new SpeedController();
+
+        /// <summary>The speed controller's tuning (the self-test compares settings by it).</summary>
+        public ControlTuning Tuning => controller.Tuning;
         private int owner;
 
         private Route route;
@@ -262,7 +280,6 @@ namespace AIEngineer.Core.Driving
         private double couplingSince = double.NaN;
         private double airWaitSince = double.NaN;
         private bool airWarned;
-        private bool stallWarned;
 
         // The end the reverser was last set toward; null when unknown (after Off).
         private ConsistEnd? lastToward;
@@ -498,8 +515,9 @@ namespace AIEngineer.Core.Driving
             couplingSince = double.NaN;
             planFailures = 0;
             airWarned = false;
-            stallWarned = false;
+            cantMoveStatus = null;
             controller.Reset();
+            controller.ForgetTries();
         }
 
         /// <summary>Whether every car's brakes are off and the train line charged: the train may take power.</summary>
@@ -557,7 +575,53 @@ namespace AIEngineer.Core.Driving
             }
             if (output.Toward.HasValue)
                 lastToward = output.Toward;
+            if (controller.CantMove != CantMove.No && (Mode == EngineerMode.Road || Mode == EngineerMode.Yard || Mode == EngineerMode.Waypoints))
+                GiveUp(train, ref output);
             return output;
+        }
+
+        // ---- A train it can't move ----
+
+        private CantMove gaveUp;
+        private double gaveUpGrade;
+        private bool gaveUpUnderWay;
+
+        // What the engineer says it does, holding a train it gave up on, until its next order.
+        private string cantMoveStatus;
+
+        /// <summary>
+        /// A fair try made (the sand, the easing, the take-up, rests for the
+        /// motors) and the train not moving, or not keeping moving: the
+        /// orders end, and the train is held on its brakes until the next.
+        /// </summary>
+        private void GiveUp(TrainState train, ref EngineerOutput output)
+        {
+            gaveUp = controller.CantMove;
+            gaveUpUnderWay = controller.Progress > 50;
+            var toward = output.Toward ?? lastToward ?? ConsistEnd.A;
+            gaveUpGrade = toward == ConsistEnd.B ? -train.RiseTowardA : train.RiseTowardA;
+            queue.Clear();
+            Mode = EngineerMode.Waypoints;
+            ClearRoute();
+            cantMoveStatus = gaveUpUnderWay ? "Can't keep the train moving here" : "Can't get the train moving here";
+            Status = cantMoveStatus;
+            output.Controls = Hold(train);
+        }
+
+        /// <summary>
+        /// Once, the tick after the engineer gave up on moving its train:
+        /// what held it back, the grade uphill the way it was going, and
+        /// whether it had been under way.
+        /// </summary>
+        public bool TakeGiveUp(out CantMove cause, out double grade, out bool underWay)
+        {
+            cause = gaveUp;
+            grade = gaveUpGrade;
+            underWay = gaveUpUnderWay;
+            if (gaveUp == CantMove.No)
+                return false;
+            gaveUp = CantMove.No;
+            return true;
         }
 
         private void TickWaypoints(double dt, TrainState train, IEngineerWorld world, ref EngineerOutput output)
@@ -570,7 +634,7 @@ namespace AIEngineer.Core.Driving
             }
             if (queue.Count == 0)
             {
-                Status = "Waiting for orders";
+                Status = cantMoveStatus ?? "Waiting for orders";
                 output.Controls = Hold(train);
                 return;
             }
@@ -661,7 +725,7 @@ namespace AIEngineer.Core.Driving
             for (var i = 0; i < legSwitches.Count; i++)
             {
                 var sw = legSwitches[i];
-                if (sw.AtDistance <= progress + 1 || sw.AtDistance > progress + switchReach)
+                if (sw.AtDistance <= progress || sw.AtDistance > progress + switchReach)
                     continue;
                 // A leg that passes a switch twice (round a loop) wants it one way and then the
                 // other: only the nearer pass is set, until the leading end has made it.
@@ -672,8 +736,9 @@ namespace AIEngineer.Core.Driving
                     world.Reserve(sw.Junction, owner);
                     continue;
                 }
-                // Never under the train itself: round a loop, its tail may still be on the switch.
-                if (world.CanThrow(sw.Junction, owner) && !world.PointsOccupied(sw.Junction))
+                // Never under the train itself or with the leading end all but on the points:
+                // the cars' places are half a second old, and round a loop the tail may still be on it.
+                if (sw.AtDistance > progress + 1 && world.CanThrow(sw.Junction, owner) && !world.PointsOccupied(sw.Junction))
                 {
                     world.Throw(sw.Junction, sw.Branch, owner);
                     continue;
@@ -721,6 +786,7 @@ namespace AIEngineer.Core.Driving
 
             StopAt = stopAt;
             TargetSpeed = planner.TargetSpeed(progress, cap, stopAt, braking);
+            var uphill = output.Toward == ConsistEnd.B ? -train.RiseTowardA : train.RiseTowardA;
             output.Controls = controller.Update(new ControlInput
             {
                 Speed = speed,
@@ -731,6 +797,10 @@ namespace AIEngineer.Core.Driving
                 Dt = dt,
                 BrakesDragging = !AirReady(train),
                 Slipping = train.Slipping,
+                MotorHeat = train.MotorHeat,
+                Uphill = uphill,
+                AmpsShare = train.MotorAmpsShare,
+                GripShare = train.GripShare,
             }, Controls(train));
             if (WaitForAir(train, ref output))
                 return;
@@ -820,6 +890,7 @@ namespace AIEngineer.Core.Driving
             }
             TargetSpeed = Approach(progress, gap);
             var reach = Math.Max(0, speed) * braking.Delay;
+            var uphill = output.Toward == ConsistEnd.B ? -train.RiseTowardA : train.RiseTowardA;
             output.Controls = gap <= 0.15
                 ? Hold(train)
                 : controller.Update(new ControlInput
@@ -833,6 +904,10 @@ namespace AIEngineer.Core.Driving
                     Dt = dt,
                     BrakesDragging = !AirReady(train),
                     Slipping = train.Slipping,
+                    MotorHeat = train.MotorHeat,
+                    Uphill = uphill,
+                    AmpsShare = train.MotorAmpsShare,
+                    GripShare = train.GripShare,
                 }, Controls(train));
             if (WaitForAir(train, ref output))
             {
@@ -994,31 +1069,14 @@ namespace AIEngineer.Core.Driving
         // Set when an order that must arrive one way round found no route that does.
         private bool wrongWayOnly;
 
-        /// <summary>What a route that arrives the wrong way round costs, ranking it after every one that doesn't, m.</summary>
-        private const double WrongWayCost = 1e5;
-
-        /// <summary>
-        /// How much more a light loco's route may cost, by the router's
-        /// reckoning (its running and 400 m a reversal), to couple facing as
-        /// asked (away from the cars, by default) before it couples the other
-        /// way round, m. Turning a loco means a wye or a loop, often kilometers
-        /// off, and every loco drives either way (a player, 17 Nov 2026:
-        /// "trying to couple with the back of the train only even when it's
-        /// faster ... to couple with the front").
-        /// </summary>
-        private const double FacingAllowance = 1000;
-
         // Set when a light loco couples facing the other way, as turning it would have cost more than the allowance: what turning adds.
         private (double Meters, int Reversals)? facingGivenUp;
 
         // The order whose facing has been logged: its numbers change as it replans, the line is written once.
         private Waypoint facingLoggedFor;
 
-        private static bool IsFacing(Waypoint wp) =>
+        internal static bool IsFacing(Waypoint wp) =>
             wp.Action == WaypointAction.Couple && (wp.Arrival == Arrival.BackFirst || wp.Arrival == Arrival.FrontFirst);
-
-        /// <summary>What a second-choice goal costs, ranking it after every first choice (the right end before the right way round), m.</summary>
-        private const double SecondChoiceCost = 1e6;
 
         /// <summary>The consist end an arrival asks to lead the last leg; null for any.</summary>
         public static ConsistEnd? Leader(Arrival arrival, TrainState train, bool intoDeadEnd = false)
@@ -1078,104 +1136,20 @@ namespace AIEngineer.Core.Driving
         /// </summary>
         public string Holding { get; set; }
 
-        /// <summary>
-        /// Plans the order's cheapest route: over every goal it offers, each
-        /// arriving as asked or, failing that, any way (ranked after), a
-        /// second-choice goal ranked after the rest.
-        /// </summary>
+        /// <summary>Plans the order's cheapest route (<see cref="RoutePlanner"/>) and readies the engineer to run it.</summary>
         private bool TryPlan(Waypoint wp, TrainState train, IEngineerWorld world, bool avoid, ConsistEnd? lastLeader,
             out RouteFailure failure, out bool missed)
         {
-            Route best = null;
-            fouledOnTheWay = false;
-            wrongWayOnly = false;
-            facingGivenUp = null;
-            // A light loco's facing for a coupling is a preference, not worth a long way round to turn it.
-            var softFacing = lastLeader.HasValue && !wp.ArrivalRequired && train.LightEngine && IsFacing(wp);
-            var bestIndex = -1;
-            var bestCost = double.PositiveInfinity;
-            missed = false;
-            failure = RouteFailure.NoPath;
-            for (var g = 0; g < wp.Goals.Count; g++)
-            {
-                var goal = wp.Goals[g];
-                var request = new RouteRequest
-                {
-                    EndA = train.EndA,
-                    OutwardA = train.OutwardA,
-                    EndB = train.EndB,
-                    OutwardB = train.OutwardB,
-                    TrainLength = train.Length,
-                    Goal = goal.Position,
-                    GoalDirection = goal.Arrive,
-                    LastLeader = lastLeader,
-                    // Its cars ahead of the loco: priced, so the loco leads on the road.
-                    ShovingEnd = train.ShovingEnd,
-                    SwitchLie = world.SelectedBranch,
-                    // A coupling runs on from where it stands; it isn't backed away from its cars.
-                    AllowBackOnto = wp.Action != WaypointAction.Couple,
-                    CanSetJunction = (j, b) =>
-                    {
-                        if ((world.SelectedBranch(j) != b && world.Jammed(j, owner)))
-                            return false;
-                        if (!SwitchRules.Fouled(world, j, b, owner))
-                            return true;
-                        fouledOnTheWay = true;
-                        return false;
-                    },
-                    JunctionPenalty = (j, b) => SwitchRules.Penalty(world, j, b, owner),
-                    TrackPenalty = avoid
-                        ? (Func<int, double>)(t => t != goal.Position.Track && world.Occupancy.IsOccupied(t, owner) ? 5000 : 0)
-                        : null,
-                    Blocked = (t, from, to) => world.Occupancy.IsStanding(t, from, to, owner),
-                };
-                var extra = goal.Instead != null ? SecondChoiceCost : 0;
-                var wrongWay = false;
-                (double Meters, int Reversals)? givenUp = null;
-                var candidate = world.Router.Find(request, out var why);
-                if (candidate != null && softFacing)
-                {
-                    request.LastLeader = null;
-                    var either = world.Router.Find(request, out _);
-                    request.LastLeader = lastLeader;
-                    if (either != null && either.Legs[either.Legs.Count - 1].Leader != lastLeader.Value
-                        && either.Cost(request) + FacingAllowance < candidate.Cost(request))
-                    {
-                        givenUp = (candidate.Running - either.Running, candidate.Reversals - either.Reversals);
-                        candidate = either;
-                        wrongWay = true;
-                        extra += FacingAllowance;
-                    }
-                }
-                if (candidate == null && lastLeader.HasValue && wp.ArrivalRequired)
-                    wrongWayOnly = true;
-                if (candidate == null && lastLeader.HasValue && !wp.ArrivalRequired)
-                {
-                    request.LastLeader = null;
-                    candidate = world.Router.Find(request, out why);
-                    wrongWay = true;
-                    extra += WrongWayCost;
-                }
-                if (candidate == null)
-                {
-                    if (failure == RouteFailure.NoPath)
-                        failure = why;
-                    continue;
-                }
-                var cost = candidate.Cost(request) + extra;
-                if (cost < bestCost)
-                {
-                    best = candidate;
-                    bestIndex = g;
-                    bestCost = cost;
-                    missed = wrongWay;
-                    facingGivenUp = givenUp;
-                }
-            }
-            route = best;
+            var plan = RoutePlanner.Plan(wp, train, world, lastLeader, avoid);
+            fouledOnTheWay = plan.FouledOnTheWay;
+            wrongWayOnly = plan.WrongWayOnly;
+            facingGivenUp = plan.FacingGivenUp;
+            failure = plan.Failure;
+            missed = plan.ArrivalMissed;
+            route = plan.Route;
             if (route == null)
                 return false;
-            wp.Choose(bestIndex);
+            wp.Choose(plan.GoalIndex);
             waypointAt = route.Legs[route.Legs.Count - 1].Length;
             if (wp.Action == WaypointAction.Couple)
                 route = ExtendLastLeg(route, world, CoupleSearch);
@@ -1236,6 +1210,12 @@ namespace AIEngineer.Core.Driving
 
         private void TickWalk(double dt, TrainState train, IEngineerWorld world, ref EngineerOutput output)
         {
+            if (Holding != null)
+            {
+                Status = Holding;
+                output.Controls = Hold(train);
+                return;
+            }
             var leader = Toward;
             var front = leader == ConsistEnd.A ? train.EndA : train.EndB;
             var outward = leader == ConsistEnd.A ? train.OutwardA : train.OutwardB;
@@ -1296,6 +1276,7 @@ namespace AIEngineer.Core.Driving
             StopAt = stopAt;
             TargetSpeed = walkPlanner.TargetSpeed(progress, cap, stopAt, braking);
             output.Toward = leader;
+            var uphill = output.Toward == ConsistEnd.B ? -train.RiseTowardA : train.RiseTowardA;
             output.Controls = controller.Update(new ControlInput
             {
                 Speed = speed,
@@ -1307,6 +1288,10 @@ namespace AIEngineer.Core.Driving
                 Dt = dt,
                 BrakesDragging = !AirReady(train),
                 Slipping = train.Slipping,
+                MotorHeat = train.MotorHeat,
+                Uphill = uphill,
+                AmpsShare = train.MotorAmpsShare,
+                GripShare = train.GripShare,
             }, Controls(train));
             if (WaitForAir(train, ref output))
                 return;
@@ -1377,12 +1362,12 @@ namespace AIEngineer.Core.Driving
         }
 
         /// <summary>Whether an earlier pass of the same switch on the leg is still ahead of the leading end.</summary>
-        private static bool WantedSooner(IReadOnlyList<SwitchSetting> switches, int index, double progress)
+        internal static bool WantedSooner(IReadOnlyList<SwitchSetting> switches, int index, double progress)
         {
             var junction = switches[index].Junction;
             for (var k = 0; k < index; k++)
             {
-                if (switches[k].Junction == junction && switches[k].AtDistance > progress + 1)
+                if (switches[k].Junction == junction && switches[k].AtDistance > progress)
                     return true;
             }
             return false;
@@ -1518,7 +1503,7 @@ namespace AIEngineer.Core.Driving
         private ControlOutput Hold(TrainState train)
         {
             controller.Reset();
-            return controller.Held(Controls(train), firm: queue.Count == 0, speed: train.SpeedTowardA);
+            return controller.Held(Controls(train), firm: queue.Count == 0, speed: train.SpeedTowardA, grade: train.RiseTowardA);
         }
 
         /// <summary>
@@ -1530,12 +1515,9 @@ namespace AIEngineer.Core.Driving
         {
             if (controller.Resting)
             {
-                Status = $"Can't get the train moving; resting the motors (try {controller.Stalls})";
-                if (controller.Stalls >= 2 && !stallWarned)
-                {
-                    stallWarned = true;
-                    Note = "can't get the train moving here: it may be too heavy for the loco on this grade, the rail too slippery, or a traction motor hurt; it rests the motors a minute between tries";
-                }
+                Status = train.Steam
+                    ? $"Can't get the train moving; shut off for a minute (try {controller.Stalls})"
+                    : $"Can't get the train moving; resting the motors (try {controller.Stalls})";
                 return true;
             }
             if (!controller.WaitingForAir)
@@ -1573,7 +1555,7 @@ namespace AIEngineer.Core.Driving
                 airWarned = true;
                 Note = $"its brakes haven't come off in {Settings.AirWaitWarning / 60:F0} minutes ({AirStatus(train).ToLowerInvariant()}): is a hose apart or an angle cock shut?";
             }
-            Status = AirStatus(train);
+            Status = controller.TakingUpPower ? "Taking up power against the brakes" : AirStatus(train);
             return true;
         }
     }

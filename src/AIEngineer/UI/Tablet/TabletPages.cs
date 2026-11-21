@@ -21,11 +21,141 @@ namespace AIEngineer.UI.Tablet
     {
         private const float Top = 84, PageH = 924 - 84 - 80;
 
+        private static readonly Color CheckBorder = Hex("8a7a5f");
+        private static readonly Color CheckFill = Hex("f7f1e2");
+        private static readonly Color CheckMark = Hex("3b2f1c");
+        private static readonly Color BillBlocked = Hex("7e2f1b");
+
         private static int engineersFrom;
         private static int billsFrom;
         private static readonly List<JobView> views = new List<JobView>();
         private static readonly HashSet<string> ticked = new HashSet<string>();
         private static float nextJobs;
+#if !PUBLIC_RELEASE
+        /// <summary>Where each steam loco's Fire button was last drawn (the self-test's).</summary>
+        internal static readonly Dictionary<TrainCar, Rect> FireButtons = new Dictionary<TrainCar, Rect>();
+
+        /// <summary>The loco the "Give orders to the loco you're on" button was last drawn for, and where (the self-test's).</summary>
+        internal static TrainCar OnButtonFor;
+        internal static Rect OnButton;
+
+        /// <summary>Where each loco's card was last drawn (the self-test's).</summary>
+        internal static readonly Dictionary<TrainCar, Rect> Cards = new Dictionary<TrainCar, Rect>();
+#endif
+
+        /// <summary>Clears cached job views, selections, and paging when the world unloads.</summary>
+        public static void ResetForUnload()
+        {
+            engineersFrom = 0;
+            billsFrom = 0;
+            views.Clear();
+            ticked.Clear();
+            nextJobs = 0f;
+#if !PUBLIC_RELEASE
+            FireButtons.Clear();
+            Cards.Clear();
+            OnButtonFor = null;
+            OnButton = default;
+#endif
+        }
+
+        // ---- The conductor ----
+
+        /// <summary>The player's conductor: its plan and Execute, then what it is calling.</summary>
+        public static void Conductor()
+        {
+            var r = new Rect(12, Top, W - 24, PageH);
+            Box(r, TabletSkin.Card);
+            var x = r.x + 24;
+            var width = r.width - 48;
+            var session = ConductorDesk.Current;
+            var c = session?.Conductor;
+            if (c == null)
+            {
+                Label(new Rect(x, r.y + 20, width, 50), "Conductor", Big);
+                Label(new Rect(x, r.y + 80, width, 200),
+                    "You drive; your conductor plans the route and lines the switches ahead of the train. Aboard your train, press a track on the map and choose Conductor. Nothing is touched until you press Execute.", Text);
+                if (Button(new Rect(x, r.y + 300, 300, 80), "Open the map", Primary))
+                    TabletUi.Go(TabletTab.Map);
+                return;
+            }
+            var label = c.Destination?.Label ?? "the destination";
+            Label(new Rect(x, r.y + 20, width, 50), $"{session.Name} to {label}", Big);
+            var buttons = r.yMax - 104;
+            switch (c.State)
+            {
+                case ConductorState.Planned:
+                    PlannedRoute(session, c, new Rect(x, r.y + 84, width, buttons - r.y - 100));
+                    if (Button(new Rect(x, buttons, 320, 80), "Execute", Primary))
+                    {
+                        TabletUi.Said(ConductorDesk.Execute());
+                        Changed();
+                    }
+                    if (Button(new Rect(x + 332, buttons, 240, 80), "See the map", Plate))
+                        TabletUi.Go(TabletTab.Map);
+                    if (Button(new Rect(x + 584, buttons, 200, 80), "Cancel", Plate))
+                    {
+                        ConductorDesk.StandDown();
+                        TabletUi.Said("Conductor: plan dropped");
+                        Changed();
+                    }
+                    break;
+                case ConductorState.Executing:
+                    Label(new Rect(x, r.y + 90, width, 130), Tint($"<size=44>{ConductorDesk.Say(c, c.Call)}</size>", ColorOf(c.Call.Level)), Big);
+                    if (c.NextCall.Kind != ConductorCallKind.None)
+                        Label(new Rect(x, r.y + 230, width, 60), $"Then: {ConductorDesk.Say(c, c.NextCall)}", Text);
+                    Label(new Rect(x, r.y + 300, width, 50), Tint($"{ConductorCall.Far(c.Remaining)} to go · {Count(c.SwitchesThrown, "switch", "switches")} lined", Soft), Text);
+                    if (Button(new Rect(x, buttons, 240, 80), "See the map", Plate))
+                        TabletUi.Go(TabletTab.Map);
+                    if (Button(new Rect(x + 252, buttons, 260, 80), "Stand down", Plate))
+                    {
+                        ConductorDesk.StandDown();
+                        TabletUi.Said("Conductor stood down; the switches are as they lie");
+                        Changed();
+                    }
+                    break;
+                default:
+                    Label(new Rect(x, r.y + 90, width, 130), Tint($"<size=44>{ConductorDesk.Say(c, c.Call)}</size>", Ok), Big);
+                    Label(new Rect(x, r.y + 230, width, 50), Tint($"{Count(c.SwitchesThrown, "switch", "switches")} lined", Soft), Text);
+                    if (Button(new Rect(x, buttons, 240, 80), "Done", Primary))
+                    {
+                        ConductorDesk.StandDown();
+                        Changed();
+                    }
+                    break;
+            }
+        }
+
+        private static void PlannedRoute(Session session, Conductor c, Rect r)
+        {
+            var route = c.Route;
+            if (route == null)
+                return;
+            var state = session.Read();
+            var first = route.Legs[0].Leader;
+            var leads = !state.LightEngine
+                ? first == state.LocoEnd ? "The loco leads" : "The cars lead"
+                : first == state.LocoFront ? "Front first" : "Back first";
+            var y = r.y;
+            void Row(string text, Look look)
+            {
+                Label(new Rect(r.x, y, r.width, 50), text, look);
+                y += 56;
+            }
+            Row($"{ConductorCall.Far(route.Length)}, {Count(route.Reversals, "reversal", "reversals")}", Text);
+            Row($"{leads} from here", Text);
+            Row($"{Count(c.SwitchesToThrow, "switch", "switches")} to throw", Text);
+            if (c.PlanNote != null)
+                Row(Tint(c.PlanNote, Wait), Text);
+            if (c.Call.Kind == ConductorCallKind.NewRoute || c.Call.Kind == ConductorCallKind.NoRoute)
+                Row(Tint(ConductorDesk.Say(c, c.Call), Wait), Text);
+            Row(Tint("Nothing has been touched yet.", Soft), Text);
+        }
+
+        private static Color ColorOf(ConductorCallLevel level) =>
+            level == ConductorCallLevel.Stop ? Alarm : level == ConductorCallLevel.Do ? Wait : Cream;
+
+        private static string Count(int n, string one, string many) => $"{n} {(n == 1 ? one : many)}";
 
         // ---- Engineers ----
 
@@ -45,23 +175,43 @@ namespace AIEngineer.UI.Tablet
                 }
                 return;
             }
+            // The loco the player is on, at hand whatever else is listed (unless it is the one
+            // orders are for already: its card is lit, with its own Give orders).
+            var top = Top;
+            var pageH = PageH;
+            var on = TabletUi.LeadOf(PlayerManager.Car);
+            if (on != null && on != TabletUi.Chosen)
+            {
+#if !PUBLIC_RELEASE
+                OnButtonFor = on;
+                OnButton = new Rect(12, Top, W - 24, 64);
+#endif
+                if (Button(new Rect(12, Top, W - 24, 64), $"Give orders to {on.ID}, the loco you're on", Primary))
+                {
+                    TabletUi.Chosen = on;
+                    TabletMap.ShowChosenNext();
+                    TabletUi.Go(TabletTab.Map);
+                }
+                top += 72;
+                pageH -= 72;
+            }
             const float minCard = 236;
-            var per = Mathf.Max(1, Mathf.Min(list.Count, (int)((PageH + 8) / (minCard + 8))));
+            var per = Mathf.Max(1, Mathf.Min(list.Count, (int)((pageH + 8) / (minCard + 8))));
             var paged = per < list.Count;
             engineersFrom = Mathf.Clamp(engineersFrom, 0, Math.Max(0, list.Count - per));
             var width = paged ? W - 24 - 76 : W - 24;
-            var height = (PageH - 8 * (per - 1)) / per;
+            var height = (pageH - 8 * (per - 1)) / per;
             for (var i = 0; i < per && engineersFrom + i < list.Count; i++)
-                EngineerCard(world, list[engineersFrom + i], new Rect(12, Top + i * (height + 8), width, height));
+                EngineerCard(world, list[engineersFrom + i], new Rect(12, top + i * (height + 8), width, height));
             if (paged)
             {
-                if (Button(new Rect(W - 12 - 68, Top, 68, 68), "▲", Plate, engineersFrom > 0))
+                if (Button(new Rect(W - 12 - 68, top, 68, 68), "▲", Plate, engineersFrom > 0))
                 {
                     engineersFrom -= per;
                     Changed();
                 }
-                Label(new Rect(W - 12 - 68, Top + 76, 68, 60), $"{engineersFrom + 1}–{Math.Min(list.Count, engineersFrom + per)}\nof {list.Count}", Centered(SoftText));
-                if (Button(new Rect(W - 12 - 68, Top + 144, 68, 68), "▼", Plate, engineersFrom + per < list.Count))
+                Label(new Rect(W - 12 - 68, top + 76, 68, 60), $"{engineersFrom + 1}–{Math.Min(list.Count, engineersFrom + per)}\nof {list.Count}", Centered(SoftText));
+                if (Button(new Rect(W - 12 - 68, top + 144, 68, 68), "▼", Plate, engineersFrom + per < list.Count))
                 {
                     engineersFrom += per;
                     Changed();
@@ -71,6 +221,9 @@ namespace AIEngineer.UI.Tablet
 
         private static void EngineerCard(World world, TrainCar loco, Rect r)
         {
+#if !PUBLIC_RELEASE
+            Cards[loco] = r;
+#endif
             var on = loco == TabletUi.Chosen;
             Box(r, on ? CardOn : TabletSkin.Card);
             var s = Host.SessionFor(loco, false);
@@ -107,7 +260,29 @@ namespace AIEngineer.UI.Tablet
             var helping = s?.Helper != null;
             var canHelp = helping || (lead != null && lead != loco && lead.trainset != null && lead.trainset == loco.trainset
                 && DV.ThingTypes.CarTypes.IsSteamLocomotive(loco.carLivery));
-            Label(new Rect(r.x + 16, r.y + 80, r.width - 32 - (canHelp ? 460 : 300), 36), TabletUi.Status(loco), Text);
+            // The steam loco's fire: the engineer's crew, or the player's.
+            var steam = s != null ? s.Steam != null : DV.ThingTypes.CarTypes.IsSteamLocomotive(loco.carLivery);
+            var buttons = 300f + (canHelp ? 158 : 0);
+            if (steam)
+            {
+                buttons += 158;
+                var youFire = s?.Steam != null ? s.Steam.PlayerFires : Main.Settings.PlayerFiresNewEngineers;
+                var fire = new Rect(r.xMax - 12 - buttons + 8, r.y + 82, 150, 56);
+#if !PUBLIC_RELEASE
+                FireButtons[loco] = fire;
+#endif
+                if (Button(fire, youFire ? "Fire: you" : "Fire: crew", youFire ? PlateOn : Plate))
+                {
+                    var crew = Host.SessionFor(loco, true)?.Steam;
+                    if (crew != null)
+                    {
+                        crew.PlayerFires = !youFire;
+                        TabletUi.Said(crew.PlayerFires ? $"{loco.ID}: you're firing; the engineer leaves the fire and the water to you" : $"{loco.ID}: the crew fires it");
+                    }
+                    Changed();
+                }
+            }
+            Label(new Rect(r.x + 16, r.y + 80, r.width - 32 - buttons, 36), TabletUi.Status(loco), Text);
             if (canHelp && Button(new Rect(r.xMax - 12 - 160 - 8 - 120 - 8 - 150, r.y + 82, 150, 56), helping ? "Helping" : "Helper", helping ? PlateOn : Plate))
             {
                 if (helping)
@@ -136,7 +311,7 @@ namespace AIEngineer.UI.Tablet
             }
             var route = s?.Engineer.Route;
             var line = s?.Jobs != null ? $"{s.Jobs.Ids}: planned together" : route != null ? $"Route {route.Length:F0} m, {route.Reversals} reversal{(route.Reversals == 1 ? "" : "s")}" : "";
-            Label(new Rect(r.x + 16, r.y + 116, r.width - 32 - 300, 30), line, Brass2Text);
+            Label(new Rect(r.x + 16, r.y + 116, r.width - 32 - buttons, 30), line, Brass2Text);
             var well = new Rect(r.x + 12, r.y + 146, r.width - 24, r.height - 158);
             Box(well, Well);
             var queue = s?.Engineer.Queue;
@@ -261,12 +436,12 @@ namespace AIEngineer.UI.Tablet
                 Fill(new Rect(r.x - 3, r.y, 3, r.height), Brass2);
                 Fill(new Rect(r.xMax, r.y, 3, r.height), Brass2);
             }
-            Fill(new Rect(r.x + 22, r.y + 20, 32, 32), Hex("8a7a5f"));
-            Fill(new Rect(r.x + 23, r.y + 21, 30, 30), Hex("f7f1e2"));
+            Fill(new Rect(r.x + 22, r.y + 20, 32, 32), CheckBorder);
+            Fill(new Rect(r.x + 23, r.y + 21, 30, 30), CheckFill);
             if (on)
-                Label(new Rect(r.x + 22, r.y + 20, 32, 32), Tint("✓", Hex("3b2f1c")), Centered(Text));
+                Label(new Rect(r.x + 22, r.y + 20, 32, 32), Tint("✓", CheckMark), Centered(Text));
             Label(new Rect(r.x + 66, r.y + 4, r.width - 72, 34), $"<b>{v.Id}</b>  <size=23>{v.Kind}</size>", BillText);
-            Label(new Rect(r.x + 66, r.y + 36, r.width - 72, 32), v.Blocked != null ? Tint("Not now: " + v.Blocked, Hex("7e2f1b")) : v.Summary, BillSmall);
+            Label(new Rect(r.x + 66, r.y + 36, r.width - 72, 32), v.Blocked != null ? Tint("Not now: " + v.Blocked, BillBlocked) : v.Summary, BillSmall);
             if (Button(r, "", Invisible))
             {
                 if (!ticked.Remove(v.Id))

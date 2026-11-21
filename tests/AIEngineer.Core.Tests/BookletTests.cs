@@ -49,8 +49,90 @@ public class BookletTests
         Assert.False(YardTrackName.TryParse("[track through]", out _));
         Assert.False(YardTrackName.TryParse("Road 12", out _));
         Assert.False(YardTrackName.TryParse(null!, out _));
+        Assert.False(YardTrackName.TryParse("[Y]_[SM]_[A-99999999999999999999-S]", out _));
+        Assert.False(YardTrackName.TryParse("[Y]_[SM]_[A-\u0661-S]", out _));
         Assert.Equal(PageRef.Overview("TS"), PageRef.OfYard("TS", "B").Up);
         Assert.Equal(PageRef.Route, PageRef.Overview("TS").Up);
+    }
+
+    [Fact]
+    public void BookletWalkerHandlesCyclesDeepChainsAndMalformedBadges()
+    {
+        // Graph with an off-page cycle on branch 0 of junction 0 that also forks to junction 1 (on page),
+        // and a deep chain of 2500 short tracks on branch 1 to junction 1.
+        var b = new TrackGraphBuilder();
+        var names = new List<string>();
+        int Add(string name, double len, MapPoint s, MapPoint e)
+        {
+            names.Add(name);
+            return b.AddTrack(len, s, e);
+        }
+
+        var west = Add("West", 200, new MapPoint(-300, 0), new MapPoint(-150, 0));
+        var east = Add("East", 200, new MapPoint(150, 0), new MapPoint(300, 0));
+
+        // Branch 0 of J0 enters an off-page switch J2: branch 0 enters a cycle that must backtrack, branch 1 goes to J1.
+        var cycleStem = Add("[track through] 1", 20, new MapPoint(-150, 0), new MapPoint(-130, 0));
+        var cycleLoop = Add("LoopBack", 20, new MapPoint(-130, 0), new MapPoint(-150, 10));
+        var cycleExit = Add("[track through] 2", 100, new MapPoint(-130, 0), new MapPoint(150, 0));
+        var cycleBack = Add("Loop2", 20, new MapPoint(-150, 10), new MapPoint(-130, 10));
+        b.Join(cycleLoop, TrackEnd.End, cycleBack, TrackEnd.Start);
+        b.Join(cycleBack, TrackEnd.End, cycleLoop, TrackEnd.Start);
+
+        // Branch 1 of J0 is a deep chain of 2500 x 1 m tracks leading to J1 (tests iterative walk without stack overflow),
+        // carrying yard track [Y]_[TS]_[B-01-S] to match LoopPage's badge "1S" on the diverging siding.
+        var firstChain = Add("[track diverging] 1", 1, new MapPoint(-150, 0), new MapPoint(-149, -6));
+        var prev = firstChain;
+        for (var i = 1; i < 2499; i++)
+        {
+            var trackName = i == 1 ? "[Y]_[TS]_[B-01-S]" : $"Chain {i}";
+            var next = Add(trackName, 1, new MapPoint(-150 + i * 0.1, -6), new MapPoint(-150 + (i + 1) * 0.1, -6));
+            b.Join(prev, TrackEnd.End, next, TrackEnd.Start);
+            prev = next;
+        }
+        var lastChain = Add("[track diverging] 2", 1, new MapPoint(120, -6), new MapPoint(150, 0));
+        b.Join(prev, TrackEnd.End, lastChain, TrackEnd.Start);
+
+        // Add J0 and J1 first so their junction IDs match LoopPage (0 and 1), then off-page J2 (id 2).
+        b.AddJunction(west, TrackEnd.End, new[] { (cycleStem, TrackEnd.Start), (firstChain, TrackEnd.Start) }, new MapPoint(-150, 0));
+        b.AddJunction(east, TrackEnd.Start, new[] { (cycleExit, TrackEnd.End), (lastChain, TrackEnd.End) }, new MapPoint(150, 0));
+        b.AddJunction(cycleStem, TrackEnd.End, new[] { (cycleLoop, TrackEnd.Start), (cycleExit, TrackEnd.Start) }, new MapPoint(-130, 0));
+        var graph = b.Build();
+
+        // Use LoopPage with malformed badges (overflowing int, non-ASCII digit, negative) in addition to normal badge.
+        var basePage = LoopPage(sidingStraight: false);
+        var badges = basePage.Badges.ToList();
+        badges.Add(new SchematicBadge(50, -50, "99999999999999999999", "S", null));
+        badges.Add(new SchematicBadge(-50, -50, "\u0661", "S", null));
+        badges.Add(new SchematicBadge(100, -50, "-1", "S", null));
+        var pageWithBadBadges = new SchematicSource(basePage.Name, basePage.Station, basePage.StationName, basePage.Yard, basePage.Title, basePage.Color, basePage.IsRoute,
+            basePage.Tiles, badges, basePage.Switches);
+
+        // Also include a switchless page with overflowing/non-ASCII badges (exercises PathOf badge fallback).
+        var switchlessTiles = new List<SchematicTile>
+        {
+            T("SM-TracksStraight", -50, 0, 90),
+            T("SM-TracksStraight", 50, 0, 90),
+        };
+        var switchlessBadges = new List<SchematicBadge>
+        {
+            new(0, 0, "99999999999999999999", "S", null),
+            new(0, 0, "\u0661", "S", null),
+            new(0, 0, "-1", "S", null),
+        };
+        var switchlessPage = new SchematicSource("[TS-C]", "TS", "Test Station", "C", "STUBS", "#808080FF", false, switchlessTiles, switchlessBadges, Array.Empty<SchematicSwitch>());
+
+        var book = Booklet.Booklet.Build(new[] { pageWithBadBadges, switchlessPage }, graph, t => names[t]);
+        var page = book.Stations.Single().Pages[0];
+        Assert.All(page.Runs, r => Assert.True(r.Matched, r.ToString()));
+        // The deep chain run matched all 2500 tracks without blowing the stack.
+        Assert.Contains(page.Runs, r => r.Path.Count == 2500);
+        // The cyclic branch backtracked out of the cycle and matched cycleExit.
+        Assert.Contains(page.Runs, r => r.Path.Any(p => names[p.Track] == "[track through] 2"));
+        // Only the valid badge ("1") was checked and agreed (malformed ones were skipped cleanly without throwing).
+        Assert.Equal(1, book.Stats.BadgesChecked);
+        Assert.Equal(1, book.Stats.BadgesAgree);
+        Assert.Equal(0, book.Stations.Single().Pages[1].Runs.Count(r => r.Matched));
     }
 
     [Fact]

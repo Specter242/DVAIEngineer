@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace AIEngineer
 {
- public static class CommsTabletApp
+    public static class CommsTabletApp
     {
         public const int Contract = 1;
         public const string Id = "ai-engineer";

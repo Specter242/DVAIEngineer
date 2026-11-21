@@ -27,8 +27,17 @@ namespace AIEngineer.Held
     {
         internal static IEnumerable<MethodBase> TargetMethods()
         {
-            yield return AccessTools.DeclaredMethod(typeof(StartingItemsController), "InstantiateItem");
-            yield return AccessTools.EnumeratorMoveNext(AccessTools.DeclaredMethod(typeof(GlobalShopController), "InstantiatePurchasedItems"));
+            var instantiate = AccessTools.DeclaredMethod(typeof(StartingItemsController), "InstantiateItem");
+            if (instantiate != null)
+                yield return instantiate;
+            else
+                Main.Warn("The engineer's tablet's lookup couldn't find StartingItemsController.InstantiateItem; saved tablets won't appear");
+            var purchased = AccessTools.DeclaredMethod(typeof(GlobalShopController), "InstantiatePurchasedItems");
+            var moveNext = purchased != null ? AccessTools.EnumeratorMoveNext(purchased) : null;
+            if (moveNext != null)
+                yield return moveNext;
+            else
+                Main.Warn("The engineer's tablet's lookup couldn't find GlobalShopController.InstantiatePurchasedItems; bought tablets won't appear");
         }
 
         /// <summary>What a load found, or the tablet if it found nothing and was asked for it.</summary>
@@ -174,7 +183,7 @@ namespace AIEngineer.Held
         }
     }
 
- [HarmonyPatch(typeof(StartingItemsController), "GetStartingItemsPrefabs")]
+    [HarmonyPatch(typeof(StartingItemsController), "GetStartingItemsPrefabs")]
     internal static class EngineerTabletStartingItems
     {
         internal const string GivenKey = "AIEngineer_TabletGiven";
@@ -258,6 +267,8 @@ namespace AIEngineer.Held
     [HarmonyPatch(typeof(GlobalShopController), "Awake")]
     internal static class EngineerTabletShop
     {
+        private static readonly FieldInfo ShopAmount = AccessTools.Field(typeof(ShopItemData), "amount");
+
         private static void Prefix(GlobalShopController __instance)
         {
             try
@@ -278,8 +289,10 @@ namespace AIEngineer.Held
                     careerOnly = source.careerOnly,
                     soldOnlyAt = new List<Shop>(source.soldOnlyAt ?? new List<Shop>()),
                 };
-                var amount = AccessTools.Field(typeof(ShopItemData), "amount");
-                amount.SetValue(data, amount.GetValue(source));
+                if (ShopAmount != null)
+                    ShopAmount.SetValue(data, ShopAmount.GetValue(source));
+                else
+                    Main.Warn("Couldn't copy shop item stock count: ShopItemData.amount not found");
                 __instance.shopItemsData.Add(data);
             }
             catch (Exception e)
@@ -322,23 +335,31 @@ namespace AIEngineer.Held
                     if (source == null)
                         continue;
                     var holder = new GameObject("[AIEngineer tablet shelf template]");
-                    holder.SetActive(false);
-                    var copy = Object.Instantiate(source.gameObject, holder.transform, false);
-                    copy.name = "AIEngineer_Tablet_ShelfItem";
-                    var tag = copy.GetComponent<ScanItemCashRegisterModule>();
-                    tag.sellingItemSpec = spec;
-                    var display = copy.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == "gadget_clinometer_base");
-                    if (display != null)
+                    ScanItemCashRegisterModule tag;
+                    try
                     {
-                        foreach (var renderer in display.GetComponentsInChildren<Renderer>(true))
-                            renderer.enabled = false;
-                        EngineerTabletBody.Build(display).localScale = Vector3.one * 0.42f;
+                        holder.SetActive(false);
+                        var copy = Object.Instantiate(source.gameObject, holder.transform, false);
+                        copy.name = "AIEngineer_Tablet_ShelfItem";
+                        tag = copy.GetComponent<ScanItemCashRegisterModule>();
+                        tag.sellingItemSpec = spec;
+                        var display = copy.GetComponentsInChildren<Transform>(true).FirstOrDefault(t => t.name == "gadget_clinometer_base");
+                        if (display != null)
+                        {
+                            foreach (var renderer in display.GetComponentsInChildren<Renderer>(true))
+                                renderer.enabled = false;
+                            EngineerTabletBody.Build(display).localScale = Vector3.one * 0.42f;
+                        }
+                        copy.transform.SetParent(source.transform.parent, false);
+                        // Beside the clinometer's shelf spot, so another mod's tablet there isn't hidden.
+                        copy.transform.localPosition = source.transform.localPosition + new Vector3(0f, 0f, 0.25f);
+                        copy.transform.localRotation = source.transform.localRotation;
                     }
-                    copy.transform.SetParent(source.transform.parent, false);
-                    // Beside the clinometer's shelf spot, so another mod's tablet there isn't hidden.
-                    copy.transform.localPosition = source.transform.localPosition + new Vector3(0f, 0f, 0.25f);
-                    copy.transform.localRotation = source.transform.localRotation;
-                    Object.Destroy(holder);
+                    finally
+                    {
+                        if (holder != null)
+                            Object.Destroy(holder);
+                    }
                     shop.scanItemResourceModules = shop.scanItemResourceModules.Append(tag).ToArray();
                     if (shop.cashRegister != null && shop.cashRegister.registerModules != null)
                     {

@@ -2,6 +2,7 @@ using System;
 using DV.UI;
 using DV.UIFramework;
 using DV.Utils;
+using HarmonyLib;
 using UnityEngine;
 using UnityModManagerNet;
 using Object = UnityEngine.Object;
@@ -66,13 +67,19 @@ namespace AIEngineer
             modEntry.OnSaveGUI = entry => Settings.Save(entry);
             WorldStreamingInit.LoadingFinished += Host.OnWorldLoaded;
             UnloadWatcher.UnloadRequested += Host.OnUnload;
-            try
+            var harmony = new Harmony(modEntry.Info.Id);
+            foreach (var type in AccessTools.GetTypesFromAssembly(typeof(Main).Assembly))
             {
-                new HarmonyLib.Harmony(modEntry.Info.Id).PatchAll(typeof(Main).Assembly);
-            }
-            catch (Exception e)
-            {
-                Error("Couldn't patch the Comms Radio; the radio mode is missing, the tablet still works", e);
+                if (!type.IsDefined(typeof(HarmonyPatch), inherit: true))
+                    continue;
+                try
+                {
+                    harmony.CreateClassProcessor(type).Patch();
+                }
+                catch (Exception e)
+                {
+                    Error($"Couldn't apply Harmony patch {type.FullName}", e);
+                }
             }
             var host = new GameObject("AIEngineer");
             Object.DontDestroyOnLoad(host);
@@ -88,8 +95,16 @@ namespace AIEngineer
         public static void Error(string message, Exception e) => Mod?.Logger.Error($"{message}: {e}");
 
         /// <summary>Shows a line in the game's notification area, as the autosave notice does.</summary>
+#if !PUBLIC_RELEASE
+        /// <summary>The last notification shown (the self-test's).</summary>
+        internal static string LastNotified;
+#endif
+
         public static void Notify(string text)
         {
+#if !PUBLIC_RELEASE
+            LastNotified = text;
+#endif
             Log(text);
             if (!Settings.ShowNotifications)
                 return;

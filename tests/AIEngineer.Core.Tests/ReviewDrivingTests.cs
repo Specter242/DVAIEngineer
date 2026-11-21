@@ -207,7 +207,7 @@ public class ReviewDrivingTests
         var caps = new ControlCapabilities { HasTrainBrake = true };
         ControlOutput output = default;
         // Starting a heavy train: the throttle opens.
-        for (var i = 0; i < 40; i++)
+        for (var i = 0; i < 60; i++)
             output = controller.Update(new ControlInput { Speed = 0.2, Target = 5, ToStop = 500, Dt = 0.2 }, caps);
         var opened = output.Throttle;
         Assert.True(opened > 0.5, $"throttle {opened:F2}");

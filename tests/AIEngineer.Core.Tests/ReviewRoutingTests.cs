@@ -278,4 +278,270 @@ public class ReviewRoutingTests
             Assert.Equal(goes, train.EndA.Track == 0);
         }
     }
+
+    [Fact]
+    public void EngineerHoldsShortOfMisalignedSwitchWithinOneMeter()
+    {
+        var world = new FakeWorld(Wye(stem: 600, branch: 600));
+        // Plan while the switch is free, then bring the nose to 0.5 m from the points with the switch misaligned.
+        var train = new NetworkTrain(world, new TrackPosition(0, 200), TrackDirection.Backward, 80);
+        var engineer = new Engineer();
+        engineer.GoTo(new Waypoint(new TrackPosition(2, 300)));
+        engineer.Tick(0.2, train.State(), world);
+        Assert.NotNull(engineer.Route);
+
+        // Move nose to 0.5 m before the switch (at offset 0), with switch misaligned back to branch 0.
+        train.Move(199.5);
+        world.Selected[0] = 0;
+        world.Throws.Clear();
+
+        var state = train.State();
+        state.Reverser = ConsistEnd.A;
+        var output = engineer.Tick(0.2, state, world);
+        // Must not throw within 1 m, and must NOT ignore the misaligned switch.
+        Assert.Empty(world.Throws);
+        Assert.Equal(0, world.Selected[0]);
+        Assert.True(engineer.StopAt < engineer.Progress, $"StopAt {engineer.StopAt} should be behind progress {engineer.Progress}");
+        Assert.Equal(0, engineer.TargetSpeed, 6);
+        Assert.Contains("switch that can't be set", engineer.Status);
+        Assert.Equal(0, output.Controls.Throttle, 6);
+
+        // Once aligned, the switch at 0.5 m is reserved and the train may proceed.
+        world.Selected[0] = 1;
+        engineer.Tick(0.2, state, world);
+        Assert.True(engineer.TargetSpeed > 0);
+    }
+
+    [Fact]
+    public void LoopSwitchIsNotThrownForSecondPassWhenWithinOneMeterOfFirstPass()
+    {
+        // A short loop (80 m < SwitchReachMin = 150 m) so both passes of junction j are within reach.
+        // At 0.5 m before the first pass, WantedSooner must still see the nearer pass and keep j on branch 0.
+        var b = new TrackGraphBuilder();
+        var stem = b.AddTrack(400, new MapPoint(0, 0), new MapPoint(400, 0));
+        var round = b.AddTrack(80, new MapPoint(400, 0), new MapPoint(400, 0.001));
+        var j = b.AddJunction(stem, TrackEnd.End, new[] { (round, TrackEnd.Start), (round, TrackEnd.End) }, new MapPoint(400, 0));
+        var world = new FakeWorld(b.Build());
+        var train = new NetworkTrain(world, new TrackPosition(stem, 200), TrackDirection.Forward, 20);
+        var engineer = new Engineer();
+        engineer.GoTo(new Waypoint(new[] { new WaypointGoal(new TrackPosition(stem, 50), TrackDirection.Backward) }) { Arrival = Arrival.FrontFirst });
+        var state = train.State();
+        state.LocoEnd = ConsistEnd.A;
+        state.LocoFront = ConsistEnd.A;
+        state.Reverser = ConsistEnd.A;
+        engineer.Tick(0.2, state, world);
+        Assert.NotNull(engineer.Route);
+        var firstBranch = engineer.Route.Legs[0].Switches[0].Branch;
+        Assert.Equal(2, engineer.Route.Legs[0].Switches.Count);
+        Assert.NotEqual(firstBranch, engineer.Route.Legs[0].Switches[1].Branch);
+
+        // Place nose 0.5 m short of the first pass with switch lined for the first pass.
+        train.Move(199.5);
+        world.Selected[j] = firstBranch;
+        world.Throws.Clear();
+        state = train.State();
+        state.LocoEnd = ConsistEnd.A;
+        state.LocoFront = ConsistEnd.A;
+        state.Reverser = ConsistEnd.A;
+        engineer.Tick(0.2, state, world);
+        Assert.Empty(world.Throws);
+        Assert.Equal(firstBranch, world.Selected[j]);
+    }
+
+    [Fact]
+    public void InterlockingApproachProtectionCrossesPlainJointsAndHandlesCycles()
+    {
+        // Stem is a 24 m turnout joined to a 100 m lead; branch 0 is a 24 m turnout joined to a 100 m track.
+        var b = new TrackGraphBuilder();
+        var stemTurnout = b.AddTrack(24, new MapPoint(0, 0), new MapPoint(24, 0));
+        var stemLead = b.AddTrack(100, new MapPoint(24, 0), new MapPoint(124, 0));
+        var b0Turnout = b.AddTrack(24, new MapPoint(0, 0), new MapPoint(-24, 0));
+        var b0Lead = b.AddTrack(100, new MapPoint(-24, 0), new MapPoint(-124, 0));
+        var b1 = b.AddTrack(100, new MapPoint(0, 0), new MapPoint(-100, -10));
+        var j = b.AddJunction(stemTurnout, TrackEnd.Start, new[] { (b0Turnout, TrackEnd.Start), (b1, TrackEnd.Start) }, new MapPoint(0, 0));
+        b.Join(stemTurnout, TrackEnd.End, stemLead, TrackEnd.Start);
+        b.Join(b0Turnout, TrackEnd.End, b0Lead, TrackEnd.Start);
+        var graph = b.Build();
+
+        var occ = new OccupancyIndex();
+        var locking = new Interlocking(graph, occ);
+
+        // Moving train on stemLead at 20..30 m -> 44 m from points (within 50 m): cannot throw.
+        occ.Add(stemLead, new OccupiedSpan(20, 30, owner: 2));
+        occ.MarkMoving(2);
+        Assert.False(locking.CanThrow(j, owner: 1, now: 0));
+
+        // Moving train at 30..40 m -> 54 m from points (beyond 50 m): can throw.
+        occ.Clear();
+        occ.Add(stemLead, new OccupiedSpan(30, 40, owner: 2));
+        occ.MarkMoving(2);
+        Assert.True(locking.CanThrow(j, owner: 1, now: 0));
+
+        // Moving train on branch 0 beyond its 24 m turnout, at 20..30 m -> 44 m from points: cannot throw.
+        occ.Clear();
+        occ.Add(b0Lead, new OccupiedSpan(20, 30, owner: 2));
+        occ.MarkMoving(2);
+        Assert.False(locking.CanThrow(j, owner: 1, now: 0));
+
+        // Cycle of short tracks (< 50 m loop) terminates cleanly.
+        var cb = new TrackGraphBuilder();
+        var s = cb.AddTrack(10, new MapPoint(0, 0), new MapPoint(10, 0));
+        var l1 = cb.AddTrack(10, new MapPoint(0, 0), new MapPoint(-10, 0));
+        var l2 = cb.AddTrack(10, new MapPoint(0, 0), new MapPoint(-10, -5));
+        var cj = cb.AddJunction(s, TrackEnd.Start, new[] { (l1, TrackEnd.Start), (l2, TrackEnd.Start) }, new MapPoint(0, 0));
+        cb.Join(s, TrackEnd.End, l1, TrackEnd.End);
+        var cGraph = cb.Build();
+        var cOcc = new OccupancyIndex();
+        cOcc.Add(l2, new OccupiedSpan(5, 9, owner: 9));
+        cOcc.MarkMoving(9);
+        var cLock = new Interlocking(cGraph, cOcc);
+        Assert.False(cLock.CanThrow(cj, owner: 1, now: 0));
+        cOcc.Clear();
+        Assert.True(cLock.CanThrow(cj, owner: 1, now: 0));
+    }
+
+    [Fact]
+    public void FoulingReachesPastFourShortPiecesAndHandlesCycles()
+    {
+        // Branch 1 consists of 5 short 6 m pieces (total 30 m < 35 m reach), then a 20 m piece.
+        var b = new TrackGraphBuilder();
+        var stem = b.AddTrack(200, new MapPoint(0, 0), new MapPoint(200, 0));
+        var b0 = b.AddTrack(200, new MapPoint(0, 0), new MapPoint(-200, 0));
+        var pieces = new int[6];
+        for (var i = 0; i < 5; i++)
+            pieces[i] = b.AddTrack(6, new MapPoint(-i * 6, -5), new MapPoint(-(i + 1) * 6, -5));
+        pieces[5] = b.AddTrack(20, new MapPoint(-30, -5), new MapPoint(-50, -5));
+        var j = b.AddJunction(stem, TrackEnd.Start, new[] { (b0, TrackEnd.Start), (pieces[0], TrackEnd.Start) }, new MapPoint(0, 0));
+        for (var i = 0; i < 5; i++)
+            b.Join(pieces[i], TrackEnd.End, pieces[i + 1], TrackEnd.Start);
+        var graph = b.Build();
+
+        var occ = new OccupancyIndex();
+        // Car on piece[4] (24..30 m from points) -> within 35 m reach, across 4 joints (5th piece).
+        occ.Add(pieces[4], new OccupiedSpan(2, 5, owner: 9));
+        Assert.True(Fouling.OtherBranchesFouled(graph, occ, j, branch: 0, ignoreOwner: 1));
+        Assert.True(Fouling.OtherBranchesFouled(graph, occ, j, branch: 0, ignoreOwner: 1, standingOnly: true));
+
+        // Car on piece[5] at 10..15 m -> 40..45 m from points (beyond 35 m reach).
+        occ.Clear();
+        occ.Add(pieces[5], new OccupiedSpan(10, 15, owner: 9));
+        Assert.False(Fouling.OtherBranchesFouled(graph, occ, j, branch: 0, ignoreOwner: 1));
+
+        // Cycle of two 5 m tracks on branch 1 terminates cleanly.
+        var cb = new TrackGraphBuilder();
+        var cs = cb.AddTrack(100, new MapPoint(0, 0), new MapPoint(100, 0));
+        var c0 = cb.AddTrack(100, new MapPoint(0, 0), new MapPoint(-100, 0));
+        var c1a = cb.AddTrack(5, new MapPoint(0, 0), new MapPoint(-5, -5));
+        var c1b = cb.AddTrack(5, new MapPoint(-5, -5), new MapPoint(0, 0));
+        var cj = cb.AddJunction(cs, TrackEnd.Start, new[] { (c0, TrackEnd.Start), (c1a, TrackEnd.Start) }, new MapPoint(0, 0));
+        cb.Join(c1a, TrackEnd.End, c1b, TrackEnd.Start);
+        cb.Join(c1b, TrackEnd.End, c1a, TrackEnd.Start);
+        Assert.False(Fouling.OtherBranchesFouled(cb.Build(), new OccupancyIndex(), cj, branch: 0, ignoreOwner: 1));
+    }
+
+    [Fact]
+    public void RoutePlannerComparesMultiGoalCandidatesBySearchCost()
+    {
+        // Two candidate goals:
+        // Goal 0 (d0b @ 10) goes through locked switch jh (HeldCost = 300 m): physical 160 m, SearchCost 470.
+        // Goal 1 (d1 @ 200) uses free switch: physical 250 m, SearchCost 260.
+        var b = new TrackGraphBuilder();
+        var s = b.AddTrack(200, new MapPoint(0, 0), new MapPoint(200, 0));
+        var d0 = b.AddTrack(100, new MapPoint(0, 0), new MapPoint(-100, 0));
+        var d1 = b.AddTrack(400, new MapPoint(0, 0), new MapPoint(-400, -10));
+        var d0a = b.AddTrack(200, new MapPoint(-100, 0), new MapPoint(-300, 0));
+        var d0b = b.AddTrack(200, new MapPoint(-100, 0), new MapPoint(-300, -5));
+        var jm = b.AddJunction(s, TrackEnd.Start, new[] { (d0, TrackEnd.Start), (d1, TrackEnd.Start) }, new MapPoint(0, 0));
+        var jh = b.AddJunction(d0, TrackEnd.End, new[] { (d0a, TrackEnd.Start), (d0b, TrackEnd.Start) }, new MapPoint(-100, 0));
+        var world = new FakeWorld(b.Build());
+        world.Selected[jm] = 0;
+        world.Selected[jh] = 0;
+        world.Locked.Add(jh);
+
+        var train = new NetworkTrain(world, new TrackPosition(s, 50), TrackDirection.Backward, 40);
+        var wp = new Waypoint(new[]
+        {
+            new WaypointGoal(new TrackPosition(d0b, 10)),
+            new WaypointGoal(new TrackPosition(d1, 200)),
+        });
+        var plan = RoutePlanner.Plan(wp, train.State(), world, lastLeader: null);
+        Assert.NotNull(plan.Route);
+        Assert.Equal(1, plan.GoalIndex);
+    }
+
+    [Fact]
+    public void RoutePlannerSoftFacingUsesSearchCostWithSwitchPenalties()
+    {
+        // Wye with legs of 180 m: normally a light loco turns on the wye to couple back-first
+        // (turning costs < 1000 m extra). Locking all three wye switches against the turn adds
+        // 3 * 300 = 900 m of HeldCost to SearchCost, pushing it over the 1000 m FacingAllowance.
+        var b = new TrackGraphBuilder();
+        var west = b.AddTrack(900, new MapPoint(-1000, 0), new MapPoint(-100, 0));
+        var centre = b.AddTrack(200, new MapPoint(-100, 0), new MapPoint(100, 0));
+        var east = b.AddTrack(900, new MapPoint(100, 0), new MapPoint(1000, 0));
+        var westLeg = b.AddTrack(180, new MapPoint(-100, 0), new MapPoint(0, 150));
+        var eastLeg = b.AddTrack(180, new MapPoint(100, 0), new MapPoint(0, 150));
+        var tail = b.AddTrack(300, new MapPoint(0, 150), new MapPoint(0, 450));
+        var jW = b.AddJunction(west, TrackEnd.End, new[] { (centre, TrackEnd.Start), (westLeg, TrackEnd.Start) }, new MapPoint(-100, 0));
+        var jE = b.AddJunction(east, TrackEnd.Start, new[] { (centre, TrackEnd.End), (eastLeg, TrackEnd.Start) }, new MapPoint(100, 0));
+        var jApex = b.AddJunction(tail, TrackEnd.Start, new[] { (westLeg, TrackEnd.End), (eastLeg, TrackEnd.End) }, new MapPoint(0, 150));
+        var world = new FakeWorld(b.Build());
+        var train = new NetworkTrain(world, new TrackPosition(east, 100), TrackDirection.Backward, 20) { CarCount = 1 };
+        var state = train.State();
+        state.LocoEnd = ConsistEnd.A;
+        state.LocoFront = ConsistEnd.A;
+
+        var wp = new Waypoint(new TrackPosition(west, 300), WaypointAction.Couple) { Arrival = Arrival.BackFirst };
+        // Unheld: turns on wye to couple back-first (End B leading).
+        var freePlan = RoutePlanner.Plan(wp, state, world, lastLeader: ConsistEnd.B);
+        Assert.NotNull(freePlan.Route);
+        Assert.Equal(ConsistEnd.B, freePlan.Route.Legs[^1].Leader);
+
+        // Lock wye switches while they lie for straight-through (branch 0): turning incurs HeldCost,
+        // so SearchCost exceeds direct + FacingAllowance and softFacing gives up the turn.
+        world.Locked.Add(jW);
+        world.Locked.Add(jE);
+        world.Locked.Add(jApex);
+        var heldPlan = RoutePlanner.Plan(wp, state, world, lastLeader: ConsistEnd.B);
+        Assert.NotNull(heldPlan.Route);
+        Assert.Equal(ConsistEnd.A, heldPlan.Route.Legs[^1].Leader);
+        Assert.NotNull(heldPlan.FacingGivenUp);
+    }
+
+    [Fact]
+    public void ShortTurnoutSafetyChecksDoNotAllocateOnRepeatedCalls()
+    {
+        // 24 m turnout branches joined to 100 m tracks: forces extended multi-piece traversal
+        // in both Interlocking.CanThrow (50 m) and Fouling.OtherBranchesFouled (35 m).
+        var b = new TrackGraphBuilder();
+        var stem = b.AddTrack(24, new MapPoint(0, 0), new MapPoint(24, 0));
+        var stemLead = b.AddTrack(100, new MapPoint(-100, 0), new MapPoint(0, 0));
+        var br0 = b.AddTrack(24, new MapPoint(24, 0), new MapPoint(48, 0));
+        var br1 = b.AddTrack(24, new MapPoint(24, 0), new MapPoint(48, 6));
+        var ext0 = b.AddTrack(100, new MapPoint(48, 0), new MapPoint(148, 0));
+        var ext1 = b.AddTrack(100, new MapPoint(48, 6), new MapPoint(148, 12));
+        b.Join(stemLead, TrackEnd.End, stem, TrackEnd.Start);
+        var j = b.AddJunction(stem, TrackEnd.End, new[] { (br0, TrackEnd.Start), (br1, TrackEnd.Start) }, new MapPoint(24, 0));
+        b.Join(br0, TrackEnd.End, ext0, TrackEnd.Start);
+        b.Join(br1, TrackEnd.End, ext1, TrackEnd.Start);
+        var graph = b.Build();
+        var occupancy = new OccupancyIndex();
+        var interlocking = new Interlocking(graph, occupancy);
+
+        // Warm up reusable scratch storage.
+        Assert.True(interlocking.CanThrow(j, owner: 1, now: 0));
+        Assert.False(Fouling.OtherBranchesFouled(graph, occupancy, j, branch: 0, ignoreOwner: 1));
+
+        var beforeThrow = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++)
+            Assert.True(interlocking.CanThrow(j, owner: 1, now: i));
+        var afterThrow = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Equal(0, afterThrow - beforeThrow);
+
+        var beforeFouling = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++)
+            Assert.False(Fouling.OtherBranchesFouled(graph, occupancy, j, branch: 0, ignoreOwner: 1));
+        var afterFouling = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Equal(0, afterFouling - beforeFouling);
+    }
 }
