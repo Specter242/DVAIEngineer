@@ -248,7 +248,8 @@ namespace AIEngineer.Game
                     return;
                 }
                 var onYard = other.TrueForAll(c => TrackOf(c, out _));
-                var noLoco = other.TrueForAll(c => !CarTypes.IsAnyLocomotiveOrTender(c.carLivery));
+                // Another loco, or a caboose, among them: the train's, kept with it.
+                var noLoco = other.TrueForAll(c => !CarTypes.IsAnyLocomotiveOrTender(c.carLivery) && !c.IsCaboose);
                 if (onYard && noLoco)
                 {
                     var n = session.CutOtherSide(setHandbrakes: true);
@@ -258,7 +259,7 @@ namespace AIEngineer.Game
                 }
                 else
                 {
-                    Main.Log($"jobs: {session.Name}: kept the {other.Count} car{(other.Count == 1 ? "" : "s")} on the loco's other side ({(onYard ? "another loco among them" : "not on a yard track")})");
+                    Main.Log($"jobs: {session.Name}: kept the {other.Count} car{(other.Count == 1 ? "" : "s")} on the loco's other side ({(onYard ? "another loco or a caboose among them" : "not on a yard track")})");
                 }
             }
             var far = FarToNear(session);
@@ -1458,9 +1459,11 @@ namespace AIEngineer.Game
                     list.Add(cars[k]);
             }
             // Locos coupled next to the engineer's own (a second unit, a slug, a tender) are its
-            // power, not cars: never set aside, put back, or cut off as strangers.
-            while (list.Count > 0 && Session.IsPower(list[list.Count - 1]))
-                list.RemoveAt(list.Count - 1);
+            // power, not cars, and a caboose there rides with them: never set aside, put back, or
+            // cut off as strangers.
+            var riding = TrainMakeup.RidingWithLoco(list, Session.RidesWithLoco);
+            if (riding > 0)
+                list.RemoveRange(list.Count - riding, riding);
             return list;
         }
 

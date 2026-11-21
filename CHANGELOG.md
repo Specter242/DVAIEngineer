@@ -1,5 +1,12 @@
 # AI Engineer: changelog
 
+## 0.16.1 (2026-11-21)
+
+- Fixed: with Persistent Jobs, an engineer sent to pick up cars at a station
+  far from you could find nothing there.
+- Fixed: working jobs, the engineer set your caboose aside. It now keeps a
+  caboose coupled next to the loco with the train.
+
 ## 0.16.0 (2026-11-21)
 
 - New: the conductor, for the train you drive yourself. Aboard it, press a

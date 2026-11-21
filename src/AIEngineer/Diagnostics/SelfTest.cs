@@ -360,6 +360,8 @@ namespace AIEngineer.Diagnostics
                 yield return Caught("firing", FiringPart());
             if (only != null && only.Contains("boarding"))
                 yield return Caught("boarding", BoardingPart());
+            if (only != null && only.Contains("farcars"))
+                yield return Caught("far cars", FarCarsPart());
             if (only != null && only.Contains("trainbrake"))
                 yield return Caught("train brake", TrainBrakePart());
             if (only != null && only.Contains("cantmove"))
@@ -1621,6 +1623,92 @@ namespace AIEngineer.Diagnostics
             else
                 Line("SKIP jobs A (starting coupled): fewer than six free tracks");
             yield return MiddleAndHeavy(s, world, station, tracks[0], tracks[1], tracks[2], tracks[3]);
+            if (tracks.Count >= 6)
+                yield return WithCaboose(s, world, station, tracks[4], tracks[5]);
+        }
+
+        /// <summary>
+        /// C: the loco takes a caboose, then a job of two flatcars: the caboose rides with the loco
+        /// throughout (mredinius, 2026-11-20: "I want to take my caboose"), never set aside.
+        /// </summary>
+        private static IEnumerator WithCaboose(Session s, World world, StationController station, NamedTrack from, NamedTrack to)
+        {
+            const string name = "jobs C: a caboose rides with the loco through the job";
+            var caboose = DV.Globals.G.Types.Liveries.FirstOrDefault(l => CarTypes.IsCaboose(l));
+            if (caboose == null)
+            {
+                Fail(name, "no caboose livery");
+                yield break;
+            }
+            var spawnedCaboose = CarSpawner.Instance.SpawnCarTypesOnTrack(new List<TrainCarLivery> { caboose }, new List<bool> { false },
+                world.Network.Tracks[to.Track], true, true);
+            if (spawnedCaboose == null || spawnedCaboose.Count == 0)
+            {
+                Fail(name, $"couldn't spawn the caboose on {to.Id}");
+                yield break;
+            }
+            var cab = spawnedCaboose[0];
+            yield return new WaitForSeconds(5);
+            world.ScanCars();
+            var cabCut = Dispatch.Cuts(world, Dispatch.MapPosition(s.Loco), 5000, s.Loco.trainset).Find(c => c.Set.cars.Contains(cab));
+            if (cabCut == null)
+            {
+                Fail(name, $"the caboose on {to.Id} isn't listed");
+                yield break;
+            }
+            Dispatch.PickUp(s, world, cabCut, queue: false, CutSide.Nearer, Arrival.Any);
+            yield return UntilQueueEmpty(s, "jobs C caboose pickup", 900);
+            if (cab.trainset != s.Loco.trainset)
+            {
+                Fail(name, $"the loco didn't couple to the caboose: status '{s.Engineer.Status}'");
+                yield break;
+            }
+            var flat = TrainCarType.FlatbedEmpty.ToV2();
+            var flats = CarSpawner.Instance.SpawnCarTypesOnTrack(new List<TrainCarLivery> { flat, flat }, new List<bool> { false, false },
+                world.Network.Tracks[from.Track], true, true);
+            if (flats == null || flats.Count < 2)
+            {
+                Fail(name, $"couldn't spawn the flatcars on {from.Id}");
+                yield break;
+            }
+            yield return new WaitForSeconds(5);
+            world.ScanCars();
+            Job job;
+            try
+            {
+                job = MakeHaul(world, station, flats, from, to);
+            }
+            catch (Exception e)
+            {
+                Fail(name, $"couldn't make the job: {e.GetType().Name}: {e.Message}");
+                yield break;
+            }
+            Line($"jobs C: {cab.ID} (caboose) on the train; {job.ID} takes {string.Join(", ", flats.Select(c => c.ID))} from {from.Id} to {to.Id}");
+            var run = JobRun.Start(s, world, new List<JobView> { Jobs.Read(world, job) }, queue: false, Arrival.BackFirst, out var problems);
+            if (run == null)
+            {
+                Fail(name, "the run didn't start" + (problems.Count > 0 ? ": " + string.Join("; ", problems) : ""));
+                yield break;
+            }
+            var leftBehind = false;
+            var elapsed = 0f;
+            while (s.Jobs != null && elapsed < 1500)
+            {
+                yield return new WaitForSeconds(1);
+                elapsed += 1;
+                leftBehind |= cab.trainset != s.Loco.trainset;
+            }
+            var done = job.tasks.TrueForAll(t => t.state == TaskState.Done);
+            var set = s.Loco.trainset;
+            var next = set != null && set == cab.trainset && Math.Abs(set.cars.IndexOf(cab) - set.cars.IndexOf(s.Loco)) == 1;
+            Check(name, done && !leftBehind && next,
+                $"{job.ID} {(done ? "done" : "NOT done: " + Jobs.Read(world, job).Summary)}; the caboose left behind at some point {leftBehind}; " +
+                $"on the train next to the loco at the end {next} ({set?.cars.Count ?? 0} cars); status '{s.Engineer.Status}'");
+            yield return ClearCars(s, flats);
+            // The caboose off the train too, so the parts after start as before.
+            if (cab != null)
+                CarSpawner.Instance.DeleteTrainCars(new List<TrainCar> { cab }, true);
+            yield return new WaitForSeconds(3);
         }
 
         /// <summary>A: the loco starts coupled to a cut; the job is the two cars nearest it; the far one is in the way.</summary>

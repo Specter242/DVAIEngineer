@@ -2,7 +2,7 @@
   "Id": "AIEngineer",
   "DisplayName": "AI Engineer",
   "Author": "Specter242",
-  "Version": "0.16.0",
+  "Version": "0.16.1",
   "ManagerVersion": "0.28.2",
   "AssemblyName": "AIEngineer.dll",
   "EntryMethod": "AIEngineer.Main.Load",

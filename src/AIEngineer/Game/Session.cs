@@ -6,6 +6,7 @@ using AIEngineer.Core.Tracks;
 using DV.MultipleUnit;
 using DV.Simulation.Controllers;
 using DV.ThingTypes;
+using DV.Utils;
 using LocoSim.Implementations;
 using UnityEngine;
 
@@ -124,6 +125,9 @@ namespace AIEngineer.Game
         /// <summary>A loco, tender, or slug: what moves a train, not what it carries.</summary>
         public static bool IsPower(TrainCar car) =>
             car != null && (car.IsLoco || CarTypes.IsAnyLocomotiveOrTender(car.carLivery) || CarTypes.IsSlug(car.carLivery));
+
+        /// <summary>The loco's power, or a caboose: what rides with the loco through a job run (<see cref="TrainMakeup.RidingWithLoco"/>).</summary>
+        public static bool RidesWithLoco(TrainCar car) => IsPower(car) || (car != null && car.IsCaboose);
 
         /// <summary>
         /// Whether the engineer has nothing to do but hold the train:
@@ -329,7 +333,131 @@ namespace AIEngineer.Game
             else
             {
                 Loco.preventDelete = previousPreventDelete;
+                ReleaseKept();
             }
+        }
+
+        // ---- The cars an order goes to ----
+        // Persistent Jobs takes the standing cuts at stations far from the player out of the world,
+        // and the game's clean-up deletes cars of no job far from the player: an engineer sent to
+        // couple to such a cut found nothing there (2026-11-21). The cars on the current order's
+        // track are kept (preventDelete, which both leave alone) while the order lasts, and a yard
+        // whose cars Persistent Jobs holds suspended is asked for them back first.
+
+#if !PUBLIC_RELEASE
+        /// <summary>How many times an order's cars were brought back from Persistent Jobs (the self-test's).</summary>
+        internal int BroughtBack;
+#endif
+
+        private Waypoint keptFor;
+        private readonly List<(TrainCar Car, bool Was)> kept = new List<(TrainCar, bool)>();
+        private float nextKeep;
+        private float nextResume;
+        private string bringingBack;
+
+        /// <summary>The hold while Persistent Jobs brings back an order's yard's cars, or null.</summary>
+        private string KeepTheOrdersCars(float now)
+        {
+            var wp = Engineer.Mode == EngineerMode.Waypoints && Engineer.Queue.Count > 0 ? Engineer.Queue[0] : null;
+            if (!ReferenceEquals(wp, keptFor))
+            {
+                ReleaseKept();
+                keptFor = wp;
+                nextKeep = 0;
+                nextResume = 0;
+            }
+            if (wp == null)
+                return null;
+            var network = world.Network;
+            var index = wp.Position.Track;
+            if (network == null || index < 0 || index >= network.Tracks.Length || network.Tracks[index] == null)
+                return null;
+            DV.Logic.Job.Track logic;
+            try
+            {
+                logic = network.Tracks[index].LogicTrack();
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            var yard = logic?.ID != null && !logic.ID.IsGeneric() ? logic.ID.yardId : null;
+            if (yard != null && PersistentJobs.Suspended(yard))
+            {
+                if (now >= nextResume)
+                {
+                    nextResume = now + 5f;
+                    if (PersistentJobs.Resume(yard))
+                        Main.Log($"{Name}: asked Persistent Jobs to bring back the cars at {yard} for {wp.Label ?? "its order"}");
+                }
+                bringingBack = yard;
+                return $"Waiting for Persistent Jobs to bring back the cars at {yard}";
+            }
+            if (bringingBack != null)
+            {
+                if (PersistentJobs.Busy)
+                    return $"Waiting for Persistent Jobs to bring back the cars at {bringingBack}";
+                Main.Log($"{Name}: the cars at {bringingBack} are back; planning again");
+#if !PUBLIC_RELEASE
+                BroughtBack++;
+#endif
+                bringingBack = null;
+                Engineer.Replan();
+                nextKeep = 0;
+            }
+            if (logic != null && now >= nextKeep)
+            {
+                nextKeep = now + 2f;
+                KeepCarsOn(logic);
+            }
+            return null;
+        }
+
+        private void KeepCarsOn(DV.Logic.Job.Track logic)
+        {
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            if (registry == null)
+                return;
+            try
+            {
+                foreach (var list in new[] { logic.GetCarsFullyOnTrack(), logic.GetCarsPartiallyOnTrack() })
+                {
+                    if (list == null)
+                        continue;
+                    foreach (var car in list)
+                    {
+                        if (car == null || !registry.logicCarToTrainCar.TryGetValue(car, out var trainCar) || trainCar == null)
+                            continue;
+                        var set = trainCar.trainset?.cars;
+                        if (set == null || (Loco != null && trainCar.trainset == Loco.trainset))
+                            continue;
+                        foreach (var c in set)
+                        {
+                            // Already kept (by this order, or by something else: left as it is).
+                            if (c == null || c.preventDelete)
+                                continue;
+                            kept.Add((c, false));
+                            c.preventDelete = true;
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Main.Warn($"{Name}: couldn't keep the cars on its order's track: {e.GetBaseException().Message}");
+            }
+        }
+
+        /// <summary>The cars kept for an order go back to as they were.</summary>
+        private void ReleaseKept()
+        {
+            foreach (var (car, was) in kept)
+            {
+                if (car != null && car != Loco)
+                    car.preventDelete = was;
+            }
+            kept.Clear();
+            bringingBack = null;
         }
 
         public void Tick(float now)
@@ -429,7 +557,7 @@ namespace AIEngineer.Game
             // a run that ends or is canceled can't leave the engineer held.
             Engineer.Holding = WatchTheFuse(state)
                 ? TractionMotors.FuseStatus
-                : Jobs != null && Jobs.Planning ? "Planning the jobs' next moves" : Steam?.Waiting(standing);
+                : Jobs != null && Jobs.Planning ? "Planning the jobs' next moves" : KeepTheOrdersCars(now) ?? Steam?.Waiting(standing);
             if (Steam != null && !steamNoted)
             {
                 steamNoted = true;
