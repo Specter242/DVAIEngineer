@@ -316,6 +316,18 @@ namespace AIEngineer.Game
                         h.Hand.CabLever(0, 0f, 1f);
                         continue;
                     }
+                    // Realistic Brakes widens a train brake handle as its cab loads: a notch past release
+                    // (a diesel's filling stroke, sprung back) and past full service, the handle's value
+                    // keeping the stock scale over the stock notches. Its lever's notches and spring aren't
+                    // the value's: read as them, release was held a notch into service, and the train
+                    // waited, then ran, with its brakes dragging (UserPaddingFTW, 2026-11-22). Any value
+                    // set on it stays in the stock travel.
+                    var stockNotches = BrakesMod.WidenedHandleStockNotches(feeder.gameObject);
+                    if (stockNotches > 0)
+                    {
+                        h.Hand.CabLever(stockNotches, 0f, 1f);
+                        continue;
+                    }
                     var span = lever.notches - 1f;
                     var lo = lever.useInnerLimitSpring ? Mathf.Clamp01(lever.innerLimitMinNotch / span) : 0f;
                     var hi = lever.useInnerLimitSpring ? Mathf.Clamp01(lever.innerLimitMaxNotch / span) : 1f;

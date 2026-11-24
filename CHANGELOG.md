@@ -1,5 +1,11 @@
 # AI Engineer: changelog
 
+## 0.16.2 (2026-11-23)
+
+- Fixed: with Realistic Brakes, while you rode in a diesel's cab, the
+  engineer left the train brake slightly on, so the train was slow to start
+  and ran with its brakes dragging.
+
 ## 0.16.1 (2026-11-21)
 
 - Fixed: with Persistent Jobs, an engineer sent to pick up cars at a station

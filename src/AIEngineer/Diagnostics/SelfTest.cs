@@ -364,6 +364,12 @@ namespace AIEngineer.Diagnostics
                 yield return Caught("far cars", FarCarsPart());
             if (only != null && only.Contains("trainbrake"))
                 yield return Caught("train brake", TrainBrakePart());
+            if (only != null && only.Contains("cabbrake"))
+                yield return Caught("train brake in the cab", TrainBrakePart(aboard: true));
+            if (only != null && only.Contains("crossmap"))
+                yield return Caught("across the map", CrossMapPart(ride: false));
+            if (only != null && only.Contains("crossride"))
+                yield return Caught("across the map, riding", CrossMapPart(ride: true));
             if (only != null && only.Contains("cantmove"))
                 yield return Caught("can't move", CantMovePart());
             if (only != null && only.Contains("firebutton"))

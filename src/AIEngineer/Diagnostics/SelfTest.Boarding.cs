@@ -118,20 +118,38 @@ namespace AIEngineer.Diagnostics
         /// with cars behind): how far from each mark it stops, how much loco
         /// brake it used on the move, and how long the start from the first
         /// stop took (the air's release and recharge under Realistic Brakes).
+        /// "cabbrake": a DE2, a DH4 and a DE6 with cars, each to a mark with
+        /// the player in its cab, its levers loaded, and each train brake
+        /// lever logged. Realistic Brakes widens a stepped train brake handle
+        /// there, a sprung filling stroke past release, and 0.16.0 read that
+        /// spring on the stock scale: it would hold the handle a notch into
+        /// service (UserPaddingFTW, Nexus, 2026-11-22: the train waits, then
+        /// runs, with its brakes dragging).
         /// </summary>
-        private static IEnumerator TrainBrakePart()
+        private static IEnumerator TrainBrakePart(bool aboard = false)
+        {
+            if (!aboard)
+            {
+                yield return TrainBrakeRun("LocoDE6", 10, false, true);
+                yield break;
+            }
+            foreach (var (id, hoppers) in new[] { ("LocoDE2", 5), ("LocoDH4", 8), ("LocoDE6", 10) })
+                yield return TrainBrakeRun(id, hoppers, true, false);
+        }
+
+        private static IEnumerator TrainBrakeRun(string locoId, int hoppers, bool aboard, bool back)
         {
             var world = Host.World;
             world.ScanCars();
             var track = LevelTracks(world).FirstOrDefault(c => c.Length >= 1800);
             var brakes = Type.GetType("RealisticBrakes.Main, RealisticBrakes", false) != null;
-            var name = $"train brake: a DE6 and 10 loaded hoppers, {(brakes ? "Realistic Brakes" : "stock air")}";
+            var name = $"train brake: a {locoId.Replace("Loco", "")} and {hoppers} loaded hoppers, {(brakes ? "Realistic Brakes" : "stock air")}{(aboard ? ", you in the cab" : "")}";
             if (track == null)
             {
                 Fail(name, "no long level track clear");
                 yield break;
             }
-            yield return BuildTrain(world, track, new[] { "LocoDE6" }, 10, false, true);
+            yield return BuildTrain(world, track, new[] { locoId }, hoppers, false, true);
             var cars = builtCars;
             if (cars == null)
             {
@@ -143,15 +161,22 @@ namespace AIEngineer.Diagnostics
             var loco = cars.First(c => c.IsLoco);
             var s = Host.SessionFor(loco, true);
             var o = loco.SimController.controlsOverrider;
+            if (aboard)
+            {
+                PlayerManager.TeleportPlayerToCar(loco);
+                yield return new WaitForSeconds(6);
+                Line(string.Format(CultureInfo.InvariantCulture, "  {0}: aboard {1}, cab loaded {2}; train brake {3:F2}; levers: {4}", name, PlayerManager.Car?.ID, loco.IsInteriorLoaded, o.Brake?.Value ?? -1f, BrakeLevers(loco)));
+            }
             var points = new[] { track.Length * 0.12, track.Length * 0.88 };
             var here = s.Read().EndA.Offset;
             var first = Math.Abs(points[0] - here) > Math.Abs(points[1] - here) ? points[0] : points[1];
             var second = first == points[0] ? points[1] : points[0];
-            foreach (var (leg, at) in new[] { ("to the mark", first), ("back to the other", second) })
+            var legs = back ? new[] { ("to the mark", first), ("back to the other", second) } : new[] { ("to the mark", first) };
+            foreach (var (leg, at) in legs)
             {
                 var goal = new Core.Tracks.TrackPosition(track.Track, at);
                 s.Engineer.GoTo(new Waypoint(goal) { Label = "train brake test" });
-                float elapsed = 0, startedIn = -1, heavy = 0, mostMoving = 0, trainMost = 0, top = 0;
+                float elapsed = 0, startedIn = -1, heavy = 0, mostMoving = 0, trainMost = 0, top = 0, trainWaiting = 0, trainCruising = 0;
                 while (elapsed < 600 && s.Engineer.Queue.Count > 0 && s.Engineer.Mode == EngineerMode.Waypoints)
                 {
                     yield return new WaitForSeconds(0.5f);
@@ -161,6 +186,11 @@ namespace AIEngineer.Diagnostics
                     if (startedIn < 0 && v > 0.5f)
                         startedIn = elapsed;
                     var ind = o.IndependentBrake?.Value ?? 0f;
+                    if (startedIn < 0)
+                        trainWaiting = Mathf.Max(trainWaiting, o.Brake?.Value ?? 0f);
+                    // The first 30 s under way: the brake let off for the run.
+                    else if (elapsed - startedIn < 30)
+                        trainCruising = Mathf.Max(trainCruising, o.Brake?.Value ?? 0f);
                     if (v > 0.3f)
                     {
                         mostMoving = Mathf.Max(mostMoving, ind);
@@ -175,13 +205,34 @@ namespace AIEngineer.Diagnostics
                 var after = s.Read();
                 var gap = Math.Min(Gap(after.EndA, goal), Gap(after.EndB, goal));
                 Check($"{name}, {leg}",
-                    s.Engineer.Queue.Count == 0 && gap < 6,
-                    string.Format(CultureInfo.InvariantCulture, "stopped {0:F1} m from the mark after {1:F0} s (top {2:F0} km/h); started moving after {3:F0} s; loco brake on the move at most {4:F2}, over 0.25 for {5:F1} s; train brake at most {6:F2}; held with loco brake {7:F2}, train brake {8:F2}; '{9}'",
-                        gap, elapsed, top * 3.6f, startedIn, mostMoving, heavy, trainMost, o.IndependentBrake?.Value ?? 0f, o.Brake?.Value ?? 0f, s.Engineer.Status));
+                    s.Engineer.Queue.Count == 0 && gap < 6 && (!aboard || (trainWaiting < 0.01f && trainCruising < 0.01f)),
+                    string.Format(CultureInfo.InvariantCulture, "stopped {0:F1} m from the mark after {1:F0} s (top {2:F0} km/h); started moving after {3:F0} s, the train brake at most {10:F2} until then and {11:F2} for 30 s after; loco brake on the move at most {4:F2}, over 0.25 for {5:F1} s; train brake at most {6:F2}; held with loco brake {7:F2}, train brake {8:F2}; '{9}'",
+                        gap, elapsed, top * 3.6f, startedIn, mostMoving, heavy, trainMost, o.IndependentBrake?.Value ?? 0f, o.Brake?.Value ?? 0f, s.Engineer.Status, trainWaiting, trainCruising));
             }
             s.Stop(secure: true);
+            if (aboard)
+                PlayerManager.TeleportPlayer(loco.transform.position + loco.transform.right * 15 + Vector3.up * 3, Quaternion.identity, null, useRotation: false);
             yield return new WaitForSeconds(3);
             yield return ClearSpawned(cars);
+        }
+
+        /// <summary>The cab's brake levers: notches, stepped, spring limits, and whether Realistic Brakes widened it.</summary>
+        private static string BrakeLevers(TrainCar loco)
+        {
+            var interior = loco.loadedInterior;
+            if (interior == null)
+                return "no cab";
+            var said = new System.Text.StringBuilder();
+            foreach (var lever in interior.GetComponentsInChildren<DV.CabControls.Spec.Lever>(true))
+            {
+                if (lever.name.IndexOf("rake", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                var widened = lever.GetComponents<Component>().Any(c => c != null && c.GetType().Name == "TrainBrakeHandle");
+                said.Append(string.Format(CultureInfo.InvariantCulture, "[{0}: notches {1}, stepped {2}, stepped value {3}, spring {4} {5}-{6}, widened {7}, value {8}] ",
+                    lever.name, lever.notches, lever.useSteppedJoint, lever.steppedValueUpdate, lever.useInnerLimitSpring, lever.innerLimitMinNotch, lever.innerLimitMaxNotch, widened,
+                    lever.GetComponent<DV.CabControls.ControlImplBase>()?.Value ?? -1f));
+            }
+            return said.Length == 0 ? "none named *rake*" : said.ToString();
         }
 
         private static IEnumerator CantMovePart()
