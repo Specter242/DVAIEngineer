@@ -28,6 +28,8 @@ namespace AIEngineer.UI.Tablet
 
         private static int engineersFrom;
         private static int billsFrom;
+        private static int sortFrom;
+        private static SortMode sortMode = SortMode.ByDestination;
         private static readonly List<JobView> views = new List<JobView>();
         private static readonly HashSet<string> ticked = new HashSet<string>();
         private static float nextJobs;
@@ -48,6 +50,9 @@ namespace AIEngineer.UI.Tablet
         {
             engineersFrom = 0;
             billsFrom = 0;
+            sortFrom = 0;
+            sortMode = SortMode.ByDestination;
+            ResetSortPreview();
             views.Clear();
             ticked.Clear();
             nextJobs = 0f;
@@ -57,6 +62,11 @@ namespace AIEngineer.UI.Tablet
             OnButtonFor = null;
             OnButton = default;
 #endif
+        }
+
+        public static void ResetSortPreview()
+        {
+            SortRun.ResetForUnload();
         }
 
         // ---- The conductor ----
@@ -244,6 +254,7 @@ namespace AIEngineer.UI.Tablet
             if (Button(new Rect(bx, r.y + 10, 110, 64), "Stop", Plate, engineer))
             {
                 s.StopHere();
+                TabletUi.Touch(loco);
                 TabletUi.Said($"{loco.ID}: stopped where it is");
                 Changed();
             }
@@ -310,7 +321,9 @@ namespace AIEngineer.UI.Tablet
                 Changed();
             }
             var route = s?.Engineer.Route;
-            var line = s?.Jobs != null ? $"{s.Jobs.Ids}: planned together" : route != null ? $"Route {route.Length:F0} m, {route.Reversals} reversal{(route.Reversals == 1 ? "" : "s")}" : "";
+            var line = s?.Jobs != null ? $"{s.Jobs.Ids}: planned together"
+                : s?.Sort != null ? s.Sort.Summary
+                : route != null ? $"Route {route.Length:F0} m, {route.Reversals} reversal{(route.Reversals == 1 ? "" : "s")}" : "";
             Label(new Rect(r.x + 16, r.y + 116, r.width - 32 - buttons, 30), line, Brass2Text);
             var well = new Rect(r.x + 12, r.y + 146, r.width - 24, r.height - 158);
             Box(well, Well);
@@ -334,6 +347,60 @@ namespace AIEngineer.UI.Tablet
                     s.RemoveOrder(index);
                     TabletUi.Said($"{loco.ID}: order {index + 1} removed");
                     Changed();
+                }
+            }
+        }
+
+        // ---- The inventory icon's page ----
+
+        /// <summary>
+        /// The Engineers page with example engineers, laid out as
+        /// <see cref="EngineerCard"/> lays out theirs, from no world: for the
+        /// tablet's inventory icon (Held/EngineerTabletBody). Its plates press
+        /// nothing.
+        /// </summary>
+        internal static void SampleEngineers()
+        {
+            var cards = new[]
+            {
+                (Id: "L-042", Lamp: Ok, On: true, Where: "DE6 on Food Factory, 6 cars", Status: "Driving to FF-C-3, 38 km/h",
+                    Line: "Route 2140 m, 1 reversal", Orders: new[] { "Drive to FF-C-3", "Uncouple 6 cars" }),
+                (Id: "L-117", Lamp: Wait, On: false, Where: "S282 on Harbor, running light", Status: "Waiting at HB-B-2",
+                    Line: "", Orders: new[] { "Couple at HB-B-5" }),
+                (Id: "L-208", Lamp: Ok, On: false, Where: "DM3 on City South, 3 cars", Status: "Shunting to CS-A-1",
+                    Line: "Route 640 m, 2 reversals", Orders: new[] { "Drive to CS-A-1" }),
+            };
+            const float minCard = 236;
+            var per = Mathf.Max(1, Mathf.Min(cards.Length, (int)((PageH + 8) / (minCard + 8))));
+            var height = (PageH - 8 * (per - 1)) / per;
+            for (var i = 0; i < per; i++)
+            {
+                var c = cards[i];
+                var r = new Rect(12, Top + i * (height + 8), W - 24, height);
+                Box(r, c.On ? CardOn : TabletSkin.Card);
+                Lamp(r.x + 16, r.y + 33, 18, c.Lamp);
+                Label(new Rect(r.x + 44, r.y + 10, 150, 64), $"<b>{c.Id}</b>", Big);
+                var bx = r.xMax - 12 - 170;
+                Button(new Rect(bx, r.y + 10, 170, 64), "Hand back", Plate);
+                bx -= 118;
+                Button(new Rect(bx, r.y + 10, 110, 64), "Stop", Plate);
+                bx -= 208;
+                Button(new Rect(bx, r.y + 10, 200, 64), "Give orders", c.On ? PlateOn : Plate);
+                Label(new Rect(r.x + 200, r.y + 10, bx - r.x - 208, 64), c.Where, SoftText);
+                const float buttons = 300f;
+                Label(new Rect(r.x + 16, r.y + 80, r.width - 32 - buttons, 36), c.Status, Text);
+                Button(new Rect(r.xMax - 12 - 160, r.y + 82, 160, 56), "Service", Plate);
+                Button(new Rect(r.xMax - 12 - 160 - 8 - 120, r.y + 82, 120, 56), "Fuel", Plate);
+                Label(new Rect(r.x + 16, r.y + 116, r.width - 32 - buttons, 30), c.Line, Brass2Text);
+                var well = new Rect(r.x + 12, r.y + 146, r.width - 24, r.height - 158);
+                Box(well, Well);
+                var rows = Mathf.Max(1, (int)(well.height / 58));
+                for (var k = 0; k < Math.Min(rows, c.Orders.Length); k++)
+                {
+                    var row = new Rect(well.x, well.y + k * 58, well.width, 58);
+                    Label(new Rect(row.x + 8, row.y, 36, 58), Tint((k + 1).ToString(), k == 0 ? Brass2 : Soft), Text);
+                    Label(new Rect(row.x + 48, row.y, row.width - 48 - 72, 58), c.Orders[k], Text);
+                    Button(new Rect(row.xMax - 66, row.y + 2, 62, 54), "✕", Plate);
                 }
             }
         }
@@ -363,7 +430,7 @@ namespace AIEngineer.UI.Tablet
             Label(new Rect(16, Top, 700, 60), $"JOBS YOU HOLD{(chosen != null ? Tint($"  for {chosen.ID}", Cream) : "")}", Section);
             var session = chosen != null ? Host.SessionFor(chosen, false) : null;
             if (session?.Jobs != null)
-                Label(new Rect(560, Top, W - 572, 60), Tint($"Working {session.Jobs.Ids}", Brass2), Small);
+                Label(new Rect(560, Top, W - 572, 60), Tint($"Working {session.Jobs.Ids}{(session.Jobs.ThenIds != null ? $", then {session.Jobs.ThenIds}" : "")}", Brass2), Small);
             var listR = new Rect(12, Top + 68, 430, PageH - 68 - 88);
             var planR = new Rect(450, Top + 68, W - 462, PageH - 68 - 88);
             Box(listR, Well);
@@ -409,8 +476,10 @@ namespace AIEngineer.UI.Tablet
             var foot = Top + PageH - 80;
             var n = chosenViews.Count(v => v.Blocked == null);
             Label(new Rect(16, foot, W - 24 - 500, 80), n > 0 ? $"{n} job{(n == 1 ? "" : "s")} ticked" : "Nothing ticked", SoftText);
+            var activeSession = chosen != null ? Host.SessionFor(chosen, false) : null;
             var can = n > 0 && chosen != null;
-            if (Button(new Rect(W - 12 - 488, foot, 240, 80), "Add to the queue", Plate, can))
+            var canQueue = can && activeSession?.Sort == null;
+            if (Button(new Rect(W - 12 - 488, foot, 240, 80), "Add to the queue", Plate, canQueue))
                 Hand(world, chosenViews, true);
             if (Button(new Rect(W - 12 - 240, foot, 240, 80), "Do it now", Primary, can))
                 Hand(world, chosenViews, false);
@@ -448,6 +517,141 @@ namespace AIEngineer.UI.Tablet
                     ticked.Add(v.Id);
                 Changed();
             }
+        }
+
+        // ---- Sort Yard ----
+
+        /// <summary>Preview and confirmation sheet for sorting a yard bowl (interchange or station sub-yard).</summary>
+        public static void Sort(World world, SortableBowl bowl)
+        {
+            var chosen = TabletUi.Chosen;
+            var preview = SortRun.GetPreview(world, bowl, sortMode, chosen);
+            var plan = preview.Assignment;
+            var suspended = preview.SuspendedYard;
+
+            var r = new Rect(12, Top, W - 24, PageH);
+            Box(r, TabletSkin.Card);
+            var x = r.x + 18;
+            var width = r.width - 36;
+
+            Label(new Rect(x, r.y + 12, width - 370, 56), $"<b>Sort {bowl.Name}</b>{(chosen != null ? Tint($"  for {chosen.ID}", Soft) : "")}", Big);
+            if (Button(new Rect(r.xMax - 18 - 140 - 8 - 220, r.y + 12, 220, 56), "By destination", sortMode == SortMode.ByDestination ? PlateOn : Plate))
+            {
+                sortMode = SortMode.ByDestination;
+                ResetSortPreview();
+                Changed();
+            }
+            if (Button(new Rect(r.xMax - 18 - 140, r.y + 12, 140, 56), "By job", sortMode == SortMode.ByJob ? PlateOn : Plate))
+            {
+                sortMode = SortMode.ByJob;
+                ResetSortPreview();
+                Changed();
+            }
+
+            var well = new Rect(x, r.y + 78, width, PageH - 78 - 96);
+            Box(well, Well);
+
+            var bannerH = 0f;
+            if (suspended != null)
+            {
+                bannerH = 64f;
+                Label(new Rect(well.x + 14, well.y + 8, well.width - 28, 52),
+                    Tint($"Persistent Jobs holds {suspended}'s cars suspended. Press Sort now to wake them and sort {bowl.Name}.", Brass2), Text);
+            }
+            else if (plan == null)
+            {
+                bannerH = 56f;
+                Label(new Rect(well.x + 14, well.y + 8, well.width - 28, 44), Tint($"Planning preview for {bowl.Name}…", Soft), Text);
+            }
+            else if (!plan.Valid)
+            {
+                bannerH = 64f;
+                Label(new Rect(well.x + 14, well.y + 8, well.width - 28, 52), Tint(string.Join("; ", plan.Problems), Alarm), Text);
+            }
+            else if (plan.AlreadySorted)
+            {
+                bannerH = 56f;
+                Label(new Rect(well.x + 14, well.y + 8, well.width - 28, 44), Tint(plan.TotalCars == 0 ? $"No freight cars to sort in {bowl.Name}." : $"{bowl.Name} is already sorted.", Ok), Text);
+            }
+
+            if (plan != null)
+            {
+                var lines = plan.Lines;
+                var listTop = well.y + 8 + bannerH;
+                var listH = well.height - 16 - bannerH;
+                const float rowH = 68f;
+                var per = Mathf.Max(1, (int)(listH / rowH));
+                var paged = lines.Count > per;
+                sortFrom = Mathf.Clamp(sortFrom, 0, Math.Max(0, lines.Count - per));
+                var rowW = well.width - 20 - (paged ? 72 : 0);
+
+                for (var i = 0; i < per && sortFrom + i < lines.Count; i++)
+                {
+                    var line = lines[sortFrom + i];
+                    var ry = listTop + i * rowH;
+                    Label(new Rect(well.x + 14, ry, 230, rowH - 6), $"<b>{line.TrackName}</b>  {Tint($"{line.TrackLength:F0} m", Soft)}", Text);
+                    string desc;
+                    if (line.Blocked)
+                        desc = Tint($"Skipped ({line.BlockedReason})", Alarm);
+                    else if (line.Keys.Count == 0)
+                        desc = Tint("Free (staging)", Soft);
+                    else
+                    {
+                        var keys = string.Join(" + ", line.Keys.Select(SortAssignment.FormatKey));
+                        var inPlace = line.AlreadyInPlace > 0 ? Tint($" ({line.AlreadyInPlace} in place)", Soft) : "";
+                        desc = $"→ <b>{keys}</b> · {line.PlannedCars} car{(line.PlannedCars == 1 ? "" : "s")}{inPlace}";
+                    }
+                    Label(new Rect(well.x + 250, ry, rowW - 246, rowH - 6), desc, Text);
+                }
+                if (paged)
+                {
+                    if (Button(new Rect(well.xMax - 68, listTop, 60, 60), "▲", Plate, sortFrom > 0))
+                    {
+                        sortFrom -= per;
+                        Changed();
+                    }
+                    if (Button(new Rect(well.xMax - 68, listTop + 68, 60, 60), "▼", Plate, sortFrom + per < lines.Count))
+                    {
+                        sortFrom += per;
+                        Changed();
+                    }
+                }
+            }
+
+            var foot = r.yMax - 88;
+            if (Button(new Rect(x, foot, 150, 76), "Back", Plate))
+                TabletUi.CloseSort();
+
+            var summaryText = chosen == null ? "Choose a loco first"
+                : suspended != null ? $"{suspended} suspended · wakes on start"
+                : plan == null ? "Planning preview…"
+                : !plan.Valid ? "Can't sort"
+                : plan.AlreadySorted ? "Already sorted"
+                : $"{plan.TotalCars} car{(plan.TotalCars == 1 ? "" : "s")} · {SortRun.ModeLabel(sortMode)}";
+            Label(new Rect(x + 164, foot, width - 164 - 472, 76), summaryText, SoftText);
+
+            var activeSession = chosen != null ? Host.SessionFor(chosen, false) : null;
+            var hasActiveRun = activeSession != null && (activeSession.Jobs != null || activeSession.Sort != null);
+            var canSortNow = chosen != null && (suspended != null || (plan != null && plan.Valid && !plan.AlreadySorted && plan.TotalCars > 0));
+            var canQueue = canSortNow && !hasActiveRun;
+            if (Button(new Rect(r.xMax - 18 - 220 - 10 - 236, foot, 236, 76), "Add to the queue", Plate, canQueue))
+                StartSort(world, bowl, queue: true);
+            if (Button(new Rect(r.xMax - 18 - 220, foot, 220, 76), "Sort now", Primary, canSortNow))
+                StartSort(world, bowl, queue: false);
+        }
+
+        private static void StartSort(World world, SortableBowl bowl, bool queue)
+        {
+            var mode = sortMode;
+            TabletUi.Order($"sorting {bowl.Name} ({SortRun.ModeLabel(mode)})", queue, s =>
+            {
+                var started = SortRun.Start(s, world, bowl, mode, queue, out var problems);
+                if (problems.Count > 0)
+                    Main.Notify($"AI engineer: {s.Name}: {string.Join("; ", problems)}.");
+                if (started == null)
+                    TabletUi.Said($"Can't sort {bowl.Name} with {s.Name}.");
+            });
+            TabletUi.Go(TabletTab.Engineers);
         }
     }
 }

@@ -3,7 +3,12 @@ using UnityEngine;
 
 namespace AIEngineer.Held
 {
-    /// <summary>The shell and inventory art: Realistic Firing's FiringTabletBody (d0f162e9), a little lighter, with a map for an icon.</summary>
+    /// <summary>
+    /// The shell and inventory art: Realistic Firing's FiringTabletBody
+    /// (d0f162e9), a little lighter. The icon is rendered from the shell and
+    /// its screen in the game's own icon style (<see cref="RenderIcon"/>);
+    /// the drawn one, a yard's ladder, stays if that fails.
+    /// </summary>
     internal static class EngineerTabletBody
     {
         private static Material material;
@@ -89,6 +94,70 @@ namespace AIEngineer.Held
             AccessTools.Field(typeof(InventoryItemSpec), "itemIconSprite").SetValue(spec, icon);
             AccessTools.Field(typeof(InventoryItemSpec), "itemIconSpriteStandard").SetValue(spec, icon);
             AccessTools.Field(typeof(InventoryItemSpec), "itemIconSpriteDropped").SetValue(spec, droppedIcon);
+            RenderIcon(spec);
+        }
+
+        /// <summary>
+        /// Sets the tablet's icon rendered from its own shell and screen, the
+        /// screen showing an example Engineers page (<see cref="ItemIcons"/>,
+        /// Realistic Firing's renderer); it keeps the drawn icon if that fails.
+        /// </summary>
+        internal static void RenderIcon(InventoryItemSpec spec)
+        {
+            GameObject model = null;
+            try
+            {
+                model = IconModel();
+                // The clinometer's own view (the tablet is made from it): its face to the viewer, turned a little.
+                ItemIcons.Apply(spec, model, ItemIcons.StockView(spec), EngineerTablet.PrefabName);
+            }
+            catch (System.Exception e)
+            {
+                Main.Warn("The engineer's tablet's icon could not be rendered (" + e.Message + "); it keeps its drawn icon");
+            }
+            finally
+            {
+                DestroyIconModel(model);
+            }
+        }
+
+        /// <summary>The tablet's shell with its screen showing the example page, for an icon; let go with <see cref="DestroyIconModel"/>.</summary>
+        private static GameObject IconModel()
+        {
+            var model = new GameObject("[engineer tablet icon model]") { hideFlags = HideFlags.HideAndDontSave };
+            Build(model.transform);
+            var page = EngineerTabletScreen.SamplePage();
+            var display = new GameObject("screen") { hideFlags = HideFlags.HideAndDontSave };
+            display.transform.SetParent(model.transform, false);
+            display.transform.localPosition = EngineerTabletScreen.SurfacePosition;
+            display.AddComponent<MeshFilter>().sharedMesh = EngineerTabletScreen.SurfaceMesh();
+            // A lit screen shows its own light; without a page, a dark glass.
+            var screen = page != null
+                ? new Material(Shader.Find("Unlit/Texture")) { mainTexture = page }
+                : new Material(Shader.Find("Standard")) { color = new Color(0.02f, 0.025f, 0.03f) };
+            screen.name = "AIEngineer_TabletIconScreen";
+            display.AddComponent<MeshRenderer>().sharedMaterial = screen;
+            return model;
+        }
+
+        /// <summary>Destroys an <see cref="IconModel"/> with its screen's page, material, and mesh; the shell's are shared and kept.</summary>
+        private static void DestroyIconModel(GameObject model)
+        {
+            if (model == null)
+                return;
+            var display = model.transform.Find("screen");
+            if (display != null)
+            {
+                var material = display.GetComponent<MeshRenderer>().sharedMaterial;
+                if (material != null)
+                {
+                    if (material.mainTexture != null)
+                        Object.DestroyImmediate(material.mainTexture);
+                    Object.DestroyImmediate(material);
+                }
+                Object.DestroyImmediate(display.GetComponent<MeshFilter>().sharedMesh);
+            }
+            Object.DestroyImmediate(model);
         }
 
         private static Sprite MakeIcon(bool dropped)

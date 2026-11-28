@@ -144,7 +144,7 @@ namespace AIEngineer
 
         /// <summary>The map's part no plate covers, where a press is a point (as the engineer's tablet's map button); none off the map.</summary>
         public static Rect PressArea(int view) =>
-            views.ContainsKey(view) && TabletUi.Page == TabletTab.Map && Host.World != null ? TabletMap.PressArea : Rect.zero;
+            views.ContainsKey(view) && TabletUi.Page == TabletTab.Map && TabletUi.Sorting == null && Host.World != null ? TabletMap.PressArea : Rect.zero;
 
         public static void PressAt(int view, Vector2 canvas)
         {

@@ -23,8 +23,24 @@ namespace AIEngineer.UI.Tablet
 
         public static TabletTab Page { get; set; } = TabletTab.Engineers;
 
+        private static TrainCar chosen;
+        private static readonly List<TrainCar> recent = new List<TrainCar>();
+        private static readonly List<TrainCar> hotbar = new List<TrainCar>();
+
         /// <summary>The loco orders are for; null if the player has none.</summary>
-        public static TrainCar Chosen { get; set; }
+        public static TrainCar Chosen
+        {
+            get => chosen;
+            set
+            {
+                chosen = value;
+                if (value != null)
+                    Touch(value);
+            }
+        }
+
+        /// <summary>When set, the tablet shows the Sort Yard preview sheet for this bowl.</summary>
+        public static SortableBowl Sorting { get; private set; }
 
         private static readonly List<TrainCar> engineers = new List<TrainCar>();
         private static float nextList;
@@ -34,13 +50,27 @@ namespace AIEngineer.UI.Tablet
 
         public static IReadOnlyList<TrainCar> Engineers => engineers;
 
+        /// <summary>Records <paramref name="loco"/> as the most recently used engineer for the top-bar hotbar.</summary>
+        public static void Touch(TrainCar loco)
+        {
+            if (loco == null)
+                return;
+            recent.Remove(loco);
+            recent.Insert(0, loco);
+            while (recent.Count > 16)
+                recent.RemoveAt(recent.Count - 1);
+        }
+
         /// <summary>Clears cached loco selection, list, and undo state when the world unloads.</summary>
         public static void ResetForUnload()
         {
             Page = TabletTab.Engineers;
-            Chosen = null;
+            chosen = null;
+            Sorting = null;
             chosenOnce = false;
             engineers.Clear();
+            recent.Clear();
+            hotbar.Clear();
             nextList = 0f;
             lastOrder = null;
             undo = null;
@@ -58,6 +88,13 @@ namespace AIEngineer.UI.Tablet
             if (Time.unscaledTime >= nextList)
                 RefreshList();
             DrawTabBar();
+            if (Sorting != null)
+            {
+                TabletMap.ClearPressArea();
+                TabletPages.Sort(world, Sorting);
+                DrawLast(new Rect(12, H - 72, W - 24, 60));
+                return;
+            }
             switch (Page)
             {
                 case TabletTab.Map:
@@ -76,6 +113,40 @@ namespace AIEngineer.UI.Tablet
                     DrawLast(new Rect(12, H - 72, W - 24, 60));
                     break;
             }
+        }
+
+        /// <summary>
+        /// A pass of an example screen for the tablet's inventory icon
+        /// (Held/EngineerTabletBody): the tab bar on Engineers with two
+        /// engineers' plates, three engineers' cards, and the last order, as
+        /// <see cref="Draw"/> draws them, from no world. Nothing it shows is
+        /// the player's, and its plates press nothing.
+        /// </summary>
+        internal static void DrawSample()
+        {
+            Box(new Rect(0, 0, W, H), ScreenBg);
+            var x = 12f;
+            foreach (var (tab, label) in Tabs)
+            {
+                Button(new Rect(x, 12, 150, 64), label, tab == TabletTab.Engineers ? TabOn : Tab);
+                x += 158;
+            }
+            // Two plates fit beside the four tabs, as the bar draws them for three engineers.
+            var plates = new[] { ("L-042", "Driving", Ok, true), ("L-117", "Waiting", Wait, false) };
+            var room = W - 12 - x;
+            var width = Mathf.Min(284, (room - 8 * (plates.Length - 1)) / plates.Length);
+            for (var i = 0; i < plates.Length; i++)
+            {
+                var (id, doing, lamp, on) = plates[i];
+                var r = new Rect(x + i * (width + 8), 12, width, 64);
+                Button(r, $"<b>{id}</b>\n<size=23>{Tint(doing, Soft)}</size>", on ? ChipOn : Chip);
+                Lamp(r.x + 14, r.y + 25, 14, lamp);
+            }
+            TabletPages.SampleEngineers();
+            var strip = new Rect(12, H - 72, W - 24, 60);
+            Box(strip, Strip);
+            Label(new Rect(strip.x + 14, strip.y, strip.width - 160, strip.height), "L-042: drive to FF-C-3", Small);
+            Button(new Rect(strip.xMax - 130, strip.y, 130, strip.height), "Undo", Plate);
         }
 
 #if !PUBLIC_RELEASE
@@ -108,6 +179,9 @@ namespace AIEngineer.UI.Tablet
             if (Chosen != null && Chosen.IsLoco && !engineers.Contains(Chosen))
                 engineers.Add(Chosen);
             engineers.Sort((a, b) => string.CompareOrdinal(a.ID, b.ID));
+            for (var i = recent.Count - 1; i >= 0; i--)
+                if (recent[i] == null)
+                    recent.RemoveAt(i);
             if (!chosenOnce)
             {
                 // The first time: the loco the player is on, if it is theirs.
@@ -117,7 +191,18 @@ namespace AIEngineer.UI.Tablet
                     Chosen = mine;
             }
             if (Chosen == null)
-                Chosen = engineers.Count > 0 ? engineers[0] : null;
+            {
+                TrainCar fallback = null;
+                for (var i = 0; i < recent.Count; i++)
+                {
+                    if (engineers.Contains(recent[i]))
+                    {
+                        fallback = recent[i];
+                        break;
+                    }
+                }
+                Chosen = fallback ?? (engineers.Count > 0 ? engineers[0] : null);
+            }
         }
 
         // ---- The tab bar: the pages, then a plate for each engineer ----
@@ -129,7 +214,7 @@ namespace AIEngineer.UI.Tablet
             var x = 12f;
             foreach (var (tab, label) in Tabs)
             {
-                if (Button(new Rect(x, 12, 150, 64), label, Page == tab ? TabOn : Tab) && Page != tab)
+                if (Button(new Rect(x, 12, 150, 64), label, Sorting == null && Page == tab ? TabOn : Tab) && (Sorting != null || Page != tab))
                     Go(tab);
                 x += 158;
             }
@@ -144,11 +229,37 @@ namespace AIEngineer.UI.Tablet
             var fit = width >= 150 ? n : Mathf.Max(1, (int)((room + 8) / (150 + 8)));
             if (fit < n)
                 width = (room - 8 * (fit - 1)) / fit;
-            // More than fit: the first ones, and the chosen loco's plate always in the last place.
-            var chosenAt = Chosen != null ? engineers.IndexOf(Chosen) : -1;
-            for (var i = 0; i < fit; i++)
+            // Show the most recently used engineers (most recent, second most recent, ...),
+            // filling any remaining slots before enough have been used with active engineers first.
+            hotbar.Clear();
+            for (var i = 0; i < recent.Count && hotbar.Count < fit; i++)
             {
-                var loco = i == fit - 1 && chosenAt >= fit ? Chosen : engineers[i];
+                var loco = recent[i];
+                if (loco != null && engineers.Contains(loco) && !hotbar.Contains(loco))
+                    hotbar.Add(loco);
+            }
+            if (hotbar.Count < fit)
+            {
+                for (var i = 0; i < engineers.Count && hotbar.Count < fit; i++)
+                {
+                    var loco = engineers[i];
+                    var s = Host.SessionFor(loco, false);
+                    if (s != null && s.Engineer.Mode != EngineerMode.Off && !hotbar.Contains(loco))
+                        hotbar.Add(loco);
+                }
+            }
+            if (hotbar.Count < fit)
+            {
+                for (var i = 0; i < engineers.Count && hotbar.Count < fit; i++)
+                {
+                    var loco = engineers[i];
+                    if (!hotbar.Contains(loco))
+                        hotbar.Add(loco);
+                }
+            }
+            for (var i = 0; i < hotbar.Count; i++)
+            {
+                var loco = hotbar[i];
                 var r = new Rect(x + i * (width + 8), 12, width, 64);
                 var on = loco == Chosen;
                 if (Button(r, $"<b>{loco.ID}</b>\n<size=23>{Tint(Short(loco), Soft)}</size>", on ? ChipOn : Chip))
@@ -159,14 +270,30 @@ namespace AIEngineer.UI.Tablet
 
         public static void Go(TabletTab tab)
         {
+            Sorting = null;
             Page = tab;
             TabletMap.Unpick();
+            Changed();
+        }
+
+        public static void OpenSort(SortableBowl bowl)
+        {
+            Sorting = bowl;
+            TabletPages.ResetSortPreview();
+            TabletMap.Unpick();
+            Changed();
+        }
+
+        public static void CloseSort()
+        {
+            Sorting = null;
             Changed();
         }
 
         public static void Choose(TrainCar loco)
         {
             Chosen = loco;
+            TabletPages.ResetSortPreview();
             TabletMap.Unpick();
             Changed();
         }
@@ -187,7 +314,9 @@ namespace AIEngineer.UI.Tablet
                 return "No engineer";
             var q = s.Engineer.Queue;
             if (s.Jobs != null)
-                return $"Jobs: {s.Jobs.Ids}";
+                return $"Jobs: {s.Jobs.Ids}{(s.Jobs.ThenIds != null ? $", then {s.Jobs.ThenIds}" : "")}";
+            if (s.Sort != null)
+                return $"Sort: {s.Sort.YardName}";
             if (q.Count == 0)
                 return s.Engineer.Mode == EngineerMode.Waypoints ? "Waiting" : s.Engineer.Status;
             return $"{Verb(q[0])} {q[0].Label}";
@@ -198,7 +327,11 @@ namespace AIEngineer.UI.Tablet
             var s = Host.SessionFor(loco, false);
             if (s == null || s.Engineer.Mode == EngineerMode.Off)
                 return "No engineer yet: an order puts one on.";
-            return s.Jobs != null ? $"Working {s.Jobs.Ids}: {s.Jobs.Status}" : s.Engineer.Status;
+            if (s.Jobs != null)
+                return $"Working {s.Jobs.Ids}: {s.Jobs.Status}{(s.Jobs.ThenIds != null ? $" Then {s.Jobs.ThenIds}." : "")}";
+            if (s.Sort != null)
+                return $"Sorting {s.Sort.YardName}: {s.Sort.Status}";
+            return s.Engineer.Status;
         }
 
         public static string Verb(Waypoint wp)
@@ -227,12 +360,13 @@ namespace AIEngineer.UI.Tablet
             var loco = Chosen;
             if (loco == null)
                 return;
+            Touch(loco);
             var session = Host.SessionFor(loco, true);
             if (session == null)
                 return;
             var hadEngineer = session.Engineer.Mode != EngineerMode.Off;
             var before = session.Engineer.Queue.ToList();
-            var hadJobs = session.Jobs != null;
+            var hadJobs = session.Jobs != null || session.Sort != null;
             give(session);
             Said($"{loco.ID}: {what}{(after ? ", after its orders" : "")}", hadJobs ? (Action)null : () =>
             {
@@ -242,6 +376,11 @@ namespace AIEngineer.UI.Tablet
                 {
                     session.Jobs.Cancel(session, "you undid it");
                     session.Jobs = null;
+                }
+                if (session.Sort != null)
+                {
+                    session.Sort.Cancel(session, "you undid it");
+                    session.Sort = null;
                 }
                 session.Engineer.ClearQueue();
                 if (!hadEngineer)

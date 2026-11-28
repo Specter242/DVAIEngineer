@@ -60,11 +60,17 @@ namespace AIEngineer.Core.Driving
         /// <summary>Whether a loco's driven wheels are slipping.</summary>
         public bool Slipping;
 
+        /// <summary>Worst loco wheelslip severity (0..1); 0 when unknown or not slipping.</summary>
+        public double SlipLevel;
+
         /// <summary>The loco's traction motor temperature, °C; 0 if it has none.</summary>
         public double MotorHeat;
 
-        /// <summary>The lead loco's driving force as a share of the rail's grip; 0 when unknown.</summary>
+        /// <summary>The most grip-limited loco's driving force as a share of the rail's grip; 0 when unknown.</summary>
         public double GripShare;
+
+        /// <summary>The same driving force as a share of the rail's unsanded grip; 0 when unknown.</summary>
+        public double UnsandedGripShare;
 
         /// <summary>The loco's traction generator current as a share of its limit; 0 if it has none.</summary>
         public double MotorAmpsShare;
@@ -684,13 +690,15 @@ namespace AIEngineer.Core.Driving
             var front = leader == ConsistEnd.A ? train.EndA : train.EndB;
             if (!leg.TryLocate(front, pieceHint, LocateTolerance, out var progress, out pieceHint))
             {
-                // A stop that ran a little long is still the stop: the order is carried out
-                // where the train stands, not chased back for (there is no route to a waypoint
-                // under the train).
-                var past = legIndex == route.Legs.Count - 1 ? leg.PastEnd(front) : double.NaN;
-                if (past <= OvershootLimit)
+                var lastLegNow = legIndex == route.Legs.Count - 1;
+                var past = leg.PastEnd(front);
+                // On the last leg, a stop that ran a little long is still the stop: the order is
+                // carried out where the train stands, not chased back for (there is no route to a
+                // waypoint under the train). If still moving fast, use all brakes (including train
+                // brake) so an independent-only cut doesn't coast off the end of the track.
+                if (lastLegNow && past <= OvershootLimit)
                 {
-                    output.Controls = Hold(train);
+                    output.Controls = Hold(train, emergency: Math.Abs(train.SpeedTowardA) > 1.0);
                     if (Math.Abs(train.SpeedTowardA) < StandingSpeed)
                     {
                         legIndex = route.Legs.Count;
@@ -699,10 +707,35 @@ namespace AIEngineer.Core.Driving
                     Status = "Past the waypoint; stopping";
                     return;
                 }
-                // Off the planned path: a switch went the wrong way, or the train was moved.
-                Status = "Off the route; replanning";
-                Replan();
-                output.Controls = Hold(train);
+                // On a reversal leg, rolling a little past the reversal point along the lead still
+                // clears the switch: stop cleanly first, then replan once from where we stand
+                // rather than thrashing Replan + MovingTheWrongWay while still moving.
+                if (!lastLegNow && leg.EndsInReversal && past <= OvershootLimit)
+                {
+                    output.Controls = Hold(train, emergency: Math.Abs(train.SpeedTowardA) > 2.5);
+                    if (Math.Abs(train.SpeedTowardA) < StandingSpeed)
+                    {
+                        Replan();
+                        Status = "Reversing";
+                    }
+                    else
+                    {
+                        Status = "Past the reversal; stopping";
+                    }
+                    return;
+                }
+                // Off the planned path: bring the train to a stand before replanning so we don't
+                // replan mid-roll into MovingTheWrongWay every tick.
+                output.Controls = Hold(train, emergency: Math.Abs(train.SpeedTowardA) > 1.0);
+                if (Math.Abs(train.SpeedTowardA) < StandingSpeed)
+                {
+                    Status = "Off the route; replanning";
+                    Replan();
+                }
+                else
+                {
+                    Status = "Off the route; stopping";
+                }
                 return;
             }
             var speed = leader == ConsistEnd.A ? train.SpeedTowardA : -train.SpeedTowardA;
@@ -797,10 +830,13 @@ namespace AIEngineer.Core.Driving
                 Dt = dt,
                 BrakesDragging = !AirReady(train),
                 Slipping = train.Slipping,
+                SlipLevel = train.SlipLevel,
                 MotorHeat = train.MotorHeat,
                 Uphill = uphill,
                 AmpsShare = train.MotorAmpsShare,
                 GripShare = train.GripShare,
+                FinalDeceleration = IndependentOnly(train) ? braking.Deceleration : 0,
+                UnsandedGripShare = train.UnsandedGripShare,
             }, Controls(train));
             if (WaitForAir(train, ref output))
                 return;
@@ -904,10 +940,12 @@ namespace AIEngineer.Core.Driving
                     Dt = dt,
                     BrakesDragging = !AirReady(train),
                     Slipping = train.Slipping,
+                    SlipLevel = train.SlipLevel,
                     MotorHeat = train.MotorHeat,
                     Uphill = uphill,
                     AmpsShare = train.MotorAmpsShare,
                     GripShare = train.GripShare,
+                    UnsandedGripShare = train.UnsandedGripShare,
                 }, Controls(train));
             if (WaitForAir(train, ref output))
             {
@@ -1013,8 +1051,12 @@ namespace AIEngineer.Core.Driving
             }
             lastPlanAttempt = clock;
             var avoid = avoidOccupied;
-            wp.Resize(train);
-            var wanted = Leader(wp.Arrival, train, wp.IntoDeadEnd);
+            if (!wp.Resize(train))
+            {
+                Status = "Waiting for the order to be replanned";
+                return false;
+            }
+            var wanted = Leader(wp.Arrival, train, wp.IntoDeadEnd, wp.Action == WaypointAction.Couple);
             if (!TryPlan(wp, train, world, avoid, wanted, out var failure, out var missed))
             {
                 Status = failure == RouteFailure.GoalUnderTrain ? "The waypoint is under the train"
@@ -1037,10 +1079,13 @@ namespace AIEngineer.Core.Driving
                 if (!ReferenceEquals(facingLoggedFor, wp))
                 {
                     facingLoggedFor = wp;
+                    var how = train.LightEngine
+                        ? Describe(wp.Arrival == Arrival.BackFirst ? Arrival.FrontFirst : Arrival.BackFirst, coupling: true)
+                        : Describe(Arrival.LocoFirst);
                     LogNote = facingGivenUp.HasValue
-                        ? $"coupling to {label} {Describe(wp.Arrival == Arrival.BackFirst ? Arrival.FrontFirst : Arrival.BackFirst, coupling: true)}: "
+                        ? $"coupling to {label} {how}: "
                           + $"turning it first would add about {Math.Max(0, Math.Round(facingGivenUp.Value.Meters / 100) * 100):F0} m and {Math.Max(0, facingGivenUp.Value.Reversals)} reversals"
-                        : $"no way to turn it to couple to {label} {Describe(wp.Arrival, coupling: true)}; coupling anyway";
+                        : $"no way to turn it to couple to {label} {(train.LightEngine ? Describe(wp.Arrival, coupling: true) : Describe(Arrival.CarsFirst))}; coupling anyway";
                 }
             }
             else if (missed)
@@ -1079,9 +1124,10 @@ namespace AIEngineer.Core.Driving
             wp.Action == WaypointAction.Couple && (wp.Arrival == Arrival.BackFirst || wp.Arrival == Arrival.FrontFirst);
 
         /// <summary>The consist end an arrival asks to lead the last leg; null for any.</summary>
-        public static ConsistEnd? Leader(Arrival arrival, TrainState train, bool intoDeadEnd = false)
+        public static ConsistEnd? Leader(Arrival arrival, TrainState train, bool intoDeadEnd = false, bool coupling = false)
         {
             var light = train.LightEngine;
+            var carsMeet = coupling && !light;
             switch (arrival)
             {
                 case Arrival.CarsFirstIntoDeadEnd:
@@ -1091,9 +1137,9 @@ namespace AIEngineer.Core.Driving
                 case Arrival.LocoFirst:
                     return light ? (ConsistEnd?)null : train.LocoEnd;
                 case Arrival.FrontFirst:
-                    return train.LocoFront;
+                    return carsMeet ? train.LocoEnd.Other() : train.LocoFront;
                 case Arrival.BackFirst:
-                    return train.LocoFront.Other();
+                    return carsMeet ? train.LocoEnd.Other() : train.LocoFront.Other();
                 default:
                     return null;
             }
@@ -1288,10 +1334,13 @@ namespace AIEngineer.Core.Driving
                 Dt = dt,
                 BrakesDragging = !AirReady(train),
                 Slipping = train.Slipping,
+                SlipLevel = train.SlipLevel,
                 MotorHeat = train.MotorHeat,
                 Uphill = uphill,
                 AmpsShare = train.MotorAmpsShare,
                 GripShare = train.GripShare,
+                FinalDeceleration = IndependentOnly(train) ? braking.Deceleration : 0,
+                UnsandedGripShare = train.UnsandedGripShare,
             }, Controls(train));
             if (WaitForAir(train, ref output))
                 return;
@@ -1456,10 +1505,15 @@ namespace AIEngineer.Core.Driving
         private BrakingModel Braking(TrainState train)
         {
             if (!train.Controls.HasTrainBrake)
-                return Settings.LightBraking;
+                return train.Controls.ManualLapLocoBrake
+                    ? new BrakingModel(Math.Min(Settings.LightBraking.Deceleration, 0.25), Math.Max(Settings.LightBraking.Delay, 3))
+                    : Settings.LightBraking;
             if (IndependentOnly(train))
-                return new BrakingModel(Math.Max(0.05, Math.Min(Settings.TrainBraking.Deceleration, Settings.LightBraking.Deceleration * train.LocoMassShare)),
-                    Math.Max(Settings.LightBraking.Delay, 2));
+                // Under Realistic Brakes, a loco's independent brake with a loaded car behind builds
+                // more slowly and delivers less deceleration than LightBraking * massShare suggests;
+                // plan conservatively so the final stop never overshoots on the independent alone.
+                return new BrakingModel(Math.Max(0.05, Math.Min(Settings.TrainBraking.Deceleration, Settings.LightBraking.Deceleration * 0.65 * train.LocoMassShare)),
+                    Math.Max(Settings.LightBraking.Delay, 3.0));
             return train.Controls.SlowAir ? SlowAirModel(Settings.SlowAirBraking, controller.AirHolding) : Settings.TrainBraking;
         }
 
@@ -1472,17 +1526,14 @@ namespace AIEngineer.Core.Driving
         /// </summary>
         public bool IndependentOnly(TrainState train) =>
             train.Controls.SlowAir && train.LocoMassShare > 0
-            && Settings.LightBraking.Deceleration * train.LocoMassShare >= Settings.SlowAirBraking.Deceleration;
+            && Settings.LightBraking.Deceleration * 0.65 * train.LocoMassShare >= Settings.SlowAirBraking.Deceleration;
 
-        /// <summary>The controls as the controller is to work them: a train on the independent alone is driven as a light engine is.</summary>
+        /// <summary>The controls as the engineer works them: a short cut under slow air prefers the independent alone, falling back to air only if the independent saturates.</summary>
         private ControlCapabilities Controls(TrainState train)
         {
             var caps = train.Controls;
             if (IndependentOnly(train))
-            {
-                caps.HasTrainBrake = false;
-                caps.SlowAir = false;
-            }
+                caps.PreferIndependent = true;
             return caps;
         }
 
@@ -1500,10 +1551,11 @@ namespace AIEngineer.Core.Driving
         /// for it to come off again), and goes on for a long stand with no
         /// orders, or to stop a train still on the move.
         /// </summary>
-        private ControlOutput Hold(TrainState train)
+        private ControlOutput Hold(TrainState train, bool emergency = false)
         {
             controller.Reset();
-            return controller.Held(Controls(train), firm: queue.Count == 0, speed: train.SpeedTowardA, grade: train.RiseTowardA);
+            var caps = emergency ? train.Controls : Controls(train);
+            return controller.Held(caps, firm: queue.Count == 0 || emergency, speed: train.SpeedTowardA, grade: train.RiseTowardA);
         }
 
         /// <summary>

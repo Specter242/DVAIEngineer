@@ -68,11 +68,11 @@ public class MotorHeatAndSteamTests
     {
         var c = new SpeedController();
         Step(c, seconds: 12);
-        var bit = Step(c, slipping: true, seconds: 1).Throttle;
-        Assert.True(bit < 0.3, $"throttle {bit:F2}");
-        Assert.Equal(bit, Step(c, seconds: 3).Throttle, 2);
-        var later = Step(c, seconds: 5).Throttle;
-        Assert.InRange(later, bit + 0.2, bit + 0.34);
+        var bit = Step(c, slipping: true, seconds: 0.6).Throttle;
+        Assert.InRange(bit, 0.1, 0.35);
+        Assert.Equal(bit, Step(c, seconds: 4).Throttle, 2);
+        var later = Step(c, seconds: 8).Throttle;
+        Assert.InRange(later, bit + 0.15, bit + 0.25);
     }
 
     [Fact]
@@ -81,17 +81,17 @@ public class MotorHeatAndSteamTests
         var c = new SpeedController();
         Step(c, seconds: 2);
         Assert.True(Step(c, slipping: true).Sand);
-        Assert.True(Step(c, seconds: 3.6).Sand);
+        Assert.True(Step(c, seconds: 4.6).Sand);
         Assert.False(Step(c, seconds: 0.6).Sand);
         // Again within seconds of the sand ending: twice as long.
         Step(c, seconds: 2);
         Step(c, slipping: true);
-        Assert.True(Step(c, seconds: 7.6).Sand);
+        Assert.True(Step(c, seconds: 9.6).Sand);
         Assert.False(Step(c, seconds: 0.6).Sand);
         // A long while with no slip: back to a short run.
         Step(c, seconds: 30);
         Step(c, slipping: true);
-        Assert.False(Step(c, seconds: 4.2).Sand);
+        Assert.False(Step(c, seconds: 5.2).Sand);
     }
 
     private static void WithCulture(CultureInfo culture, Action body)
@@ -211,6 +211,55 @@ public class MotorHeatAndSteamTests
         Assert.StartsWith("the water is out of sight", watch.NextWarning(Boiler(glass: 0.05)));
         Assert.Null(watch.NextWarning(Boiler(glass: 0.05)));
         Assert.Null(new SteamWatch().NextWarning(Boiler(1, 0, false)));
+    }
+
+    [Fact]
+    public void SteamGearHooksUpWithSpeedAndDropsToCornerWhenDriftingShut()
+    {
+        // Starting: full forward corner (1.0).
+        Assert.Equal(1.0, SteamGear.Reverser(locoForwardSpeed: 0.5, throttle: 0.5, orderedForward: true, currentReverser: 1.0)!.Value, 3);
+        // Cruising at 25 km/h (~7 m/s) and 50 km/h (~14 m/s): properly hooked up.
+        var at25 = SteamGear.Reverser(locoForwardSpeed: 7.0, throttle: 0.4, orderedForward: true, currentReverser: 1.0)!.Value;
+        var at50 = SteamGear.Reverser(locoForwardSpeed: 14.0, throttle: 0.4, orderedForward: true, currentReverser: at25)!.Value;
+        var travel25 = (at25 - 0.5) * 2.0;
+        var travel50 = (at50 - 0.5) * 2.0;
+        Assert.InRange(travel25, 0.30, 0.45);
+        Assert.InRange(travel50, 0.18, 0.28);
+        Assert.True(travel50 < travel25);
+
+        // Pulling hard on a grade at full throttle lengthens cutoff compared to light cruising.
+        var hard25 = SteamGear.Reverser(locoForwardSpeed: 7.0, throttle: 1.0, orderedForward: true, currentReverser: at25)!.Value;
+        Assert.True((hard25 - 0.5) * 2.0 > travel25 + 0.2);
+
+        // Shutting throttle while moving drops immediately into the corner (never triggers Realistic Firing Drifting.HookedUp).
+        Assert.Equal(1.0, SteamGear.Reverser(locoForwardSpeed: 12.0, throttle: 0.0, orderedForward: true, currentReverser: at50)!.Value, 3);
+        Assert.Equal(1.0, SteamGear.Reverser(locoForwardSpeed: 12.0, throttle: 0.01, orderedForward: null, currentReverser: at50)!.Value, 3);
+        // Moving in reverse with throttle shut drops into the reverse corner (0.0), even if ordered forward.
+        Assert.Equal(0.0, SteamGear.Reverser(locoForwardSpeed: -10.0, throttle: 0.0, orderedForward: false, currentReverser: 0.35)!.Value, 3);
+        Assert.Equal(0.0, SteamGear.Reverser(locoForwardSpeed: -10.0, throttle: 0.0, orderedForward: true, currentReverser: 0.35)!.Value, 3);
+
+        // Hysteresis: once in the corner, a barely cracked throttle (< RehookThrottle) stays in the corner; opening past RehookThrottle hooks up.
+        Assert.Equal(1.0, SteamGear.Reverser(locoForwardSpeed: 12.0, throttle: 0.04, orderedForward: true, currentReverser: 1.0)!.Value, 3);
+        Assert.True(SteamGear.Reverser(locoForwardSpeed: 12.0, throttle: 0.10, orderedForward: true, currentReverser: 1.0)!.Value < 0.70);
+        // Standing with no ordered direction leaves the reverser alone.
+        Assert.Null(SteamGear.Reverser(locoForwardSpeed: 0.0, throttle: 0.0, orderedForward: null, currentReverser: 0.5));
+    }
+
+    [Fact]
+    public void SteamGearNeverLeavesEngineDriftingHookedUp()
+    {
+        // Sweep speeds 0..25 m/s, throttles 0..1, both directions: Realistic Firing's
+        // Drifting.HookedUp (throttle < 0.02 && |speed| > 5.5 && |reverser| < 0.8) must NEVER hold.
+        foreach (var dir in new[] { 1.0, -1.0 })
+        foreach (var speed in new[] { 0.0, 2.0, 5.6, 8.0, 12.0, 18.0, 25.0 })
+        foreach (var throttle in new[] { 0.0, 0.01, 0.019, 0.02, 0.03, 0.05, 0.1, 0.5, 1.0 })
+        {
+            var rev = SteamGear.Reverser(dir * speed, throttle, dir > 0, currentReverser: dir > 0 ? 0.65 : 0.35);
+            Assert.NotNull(rev);
+            var travel = System.Math.Abs(rev!.Value - 0.5) * 2.0;
+            var hookedUpDrifting = throttle < 0.02 && speed > 5.5 && travel < 0.80;
+            Assert.False(hookedUpDrifting, $"drifting hooked up at v={speed}, thr={throttle}, travel={travel:F2}");
+        }
     }
 
     [Fact]
@@ -442,10 +491,14 @@ public class GradeStartTests
             output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
         var at = output.Throttle;
         for (var i = 0; i < 25; i++)
-            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.9 }, Freight);
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.84 }, Freight);
         Assert.Equal(at, output.Throttle, 6);
-        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.99 }, Freight);
-        Assert.Equal(at - 0.03, output.Throttle, 6);
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.95 }, Freight);
+        var backed = output.Throttle;
+        Assert.Equal(at - 0.05, backed, 6);
+        // After easing back from GripMost, it holds briefly so a notched lever doesn't bounce right back.
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.7 }, Freight);
+        Assert.Equal(backed, output.Throttle, 6);
     }
 
     [Fact]
@@ -485,15 +538,160 @@ public class GradeStartTests
     }
 
     [Fact]
-    public void SlowAndNearTheGripTheSandRunsWhateverTheThrottle()
+    public void ProactiveSandRunsAtAnySpeedWhenNearUnsandedGripAndHoldsWithHysteresis()
     {
         var controller = new SpeedController();
-        var output = controller.Update(new ControlInput { Speed = 0.5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        ControlOutput output = default;
+        // Steady road speed (5 m/s = 18 km/h) on dry rail: light pull, no sand.
+        for (var i = 0; i < 15; i++)
+            output = controller.Update(new ControlInput { Speed = 5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.4, UnsandedGripShare = 0.4 }, Freight);
         Assert.False(output.Sand);
-        output = controller.Update(new ControlInput { Speed = 0.5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.9 }, Freight);
+        // Pulling hard near unsanded grip at 18 km/h: sand turns on proactively.
+        output = controller.Update(new ControlInput { Speed = 5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.75, UnsandedGripShare = 0.75 }, Freight);
         Assert.True(output.Sand);
-        output = controller.Update(new ControlInput { Speed = 5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.9 }, Freight);
+        // Once sand raises adhesion, GripShare drops to 0.35 while UnsandedGripShare stays 0.75: sand stays on (no chatter).
+        output = controller.Update(new ControlInput { Speed = 5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.35, UnsandedGripShare = 0.75 }, Freight);
+        Assert.True(output.Sand);
+        // Still between SandGripOff (0.55) and SandGripOn (0.72): stays on.
+        output = controller.Update(new ControlInput { Speed = 5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.30, UnsandedGripShare = 0.62 }, Freight);
+        Assert.True(output.Sand);
+        // Once demand eases under SandGripOff: sand turns off cleanly.
+        output = controller.Update(new ControlInput { Speed = 5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.25, UnsandedGripShare = 0.50 }, Freight);
         Assert.False(output.Sand);
+    }
+
+    [Fact]
+    public void ActiveSlipCutIsNotUndoneByGripMost()
+    {
+        var controller = new SpeedController();
+        ControlOutput output = default;
+        for (var i = 0; i < 50; i++)
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        var before = output.Throttle; // 0.60
+        // Slipping with GripShare = 0.99 (> GripMost): SlipInitialCut + SlipCut*dt must cut full amount, not be raised back by GripMost.
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, Slipping = true, SlipLevel = 0.1, GripShare = 0.99 }, Freight);
+        Assert.True(output.Throttle <= before - 0.18, $"throttle {output.Throttle:F2} from {before:F2}");
+    }
+
+    [Fact]
+    public void NextNotchProjectionDoesNotTrapFirstNotchAtStandstill()
+    {
+        var controller = new SpeedController();
+        ControlOutput output = default;
+        // Build up to notch 1 (~0.09) at standstill on a wet grade at 50 % grip.
+        for (var i = 0; i < 8; i++)
+            output = controller.Update(new ControlInput { Speed = 0, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.50, UnsandedGripShare = 1.0 }, Freight);
+        Assert.True(output.Throttle > 0.08);
+        // Even while creeping backward at 50 % grip, throttle must keep opening past notch 1 rather than freezing.
+        for (var i = 0; i < 10; i++)
+            output = controller.Update(new ControlInput { Speed = -0.03, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.50, UnsandedGripShare = 1.0 }, Freight);
+        Assert.True(output.Throttle > 0.18, $"stuck at {output.Throttle:F2}");
+        // Once moving past notch 1 at 76 % grip, next-notch projection holds throttle rather than jumping past adhesion.
+        var held = output.Throttle;
+        for (var i = 0; i < 10; i++)
+            output = controller.Update(new ControlInput { Speed = 1.5, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, GripShare = 0.76, UnsandedGripShare = 0.76 }, Freight);
+        Assert.Equal(held, output.Throttle, 3);
+    }
+
+    [Fact]
+    public void RepeatedSlipsBackOffTheHoldInsteadOfHeadBanging()
+    {
+        var controller = new SpeedController();
+        ControlOutput output = default;
+        for (var i = 0; i < 50; i++)
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        // First slip: holds 4 s.
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, Slipping = true, SlipLevel = 0.1 }, Freight);
+        var first = output.Throttle;
+        for (var i = 0; i < 20; i++)
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        Assert.Equal(first, output.Throttle, 3);
+        // After 5 s it climbs a little, then slips again: hold doubles to 8 s.
+        for (var i = 0; i < 25; i++)
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        Assert.True(output.Throttle > first + 0.05);
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, Slipping = true, SlipLevel = 0.1 }, Freight);
+        var second = output.Throttle;
+        for (var i = 0; i < 38; i++) // 7.6 s
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        Assert.Equal(second, output.Throttle, 3);
+    }
+
+    [Fact]
+    public void CatchingWheelsHoldTheCutThrottleInsteadOfChoppingToIdle()
+    {
+        var controller = new SpeedController();
+        ControlOutput output = default;
+        for (var i = 0; i < 45; i++)
+            output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2 }, Freight);
+        // Onset: immediate cut.
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, Slipping = true, SlipLevel = 0.10, GripShare = 1.05 }, Freight);
+        var afterOnset = output.Throttle;
+        Assert.True(afterOnset > 0.2, $"afterOnset {afterOnset:F2}");
+        // Next tick: wheelslip decaying rapidly with pull under the rail limit -> hold rather than cut further.
+        output = controller.Update(new ControlInput { Speed = 1, Target = 11, ToStop = double.PositiveInfinity, Dt = 0.2, Slipping = true, SlipLevel = 0.03, GripShare = 0.70 }, Freight);
+        Assert.Equal(afterOnset, output.Throttle, 6);
+    }
+
+    [Theory]
+    [InlineData(2.25, 0.012)]
+    [InlineData(1.0, 0.006)]
+    public void NotchedLocoOnWetGradeClimbsWithMinimalWheelWear(double sandMax, double grade)
+    {
+        // Models a DE2 (11 throttle steps, 37 kN unsanded wet grip, sand with 0.5 s ramp,
+        // adhesion drop while slipping, and DamageController's 10*wheelslip*dt HP wear) hauling 250 t.
+        var train = new SimTrain { Mass = 250_000, MaxTractiveForce = 160_000, Power = 400_000, Grade = grade };
+        var controller = new SpeedController();
+        double sandFlow = 0, wheelslip = 0, wheelDamage = 0, slipSeconds = 0, notch = 0;
+        const double unsandedLimit = 37_000;
+        for (var t = 0.0; t < 180 && train.Position < 600; t += 0.2)
+        {
+            var sandCoef = 1 + (sandMax - 1) * sandFlow;
+            var adhesionDrop = 1 - 0.5 * wheelslip;
+            var limit = unsandedLimit * sandCoef * adhesionDrop;
+            var maxForce = System.Math.Min(train.MaxTractiveForce, train.Power / System.Math.Max(System.Math.Abs(train.Speed), 0.5));
+            var rawForce = notch / 11.0 * maxForce;
+            var output = controller.Update(new ControlInput
+            {
+                Speed = train.Speed,
+                Target = 11,
+                ToStop = 2000,
+                Dt = 0.2,
+                Uphill = train.Grade,
+                Slipping = wheelslip > 0,
+                SlipLevel = wheelslip,
+                GripShare = rawForce / limit,
+                UnsandedGripShare = rawForce / unsandedLimit,
+            }, Freight);
+            notch = System.Math.Round(output.Throttle * 11.0);
+            for (var k = 0; k < 10; k++)
+            {
+                const double sub = 0.02;
+                var sandTarget = output.Sand ? 1.0 : 0.0;
+                sandFlow += (sandTarget - sandFlow) * System.Math.Min(1, sub / 0.5);
+                sandCoef = 1 + (sandMax - 1) * sandFlow;
+                adhesionDrop = 1 - 0.5 * wheelslip;
+                limit = unsandedLimit * sandCoef * adhesionDrop;
+                maxForce = System.Math.Min(train.MaxTractiveForce, train.Power / System.Math.Max(System.Math.Abs(train.Speed), 0.5));
+                var force = notch / 11.0 * maxForce;
+                var slipTarget = force > limit ? System.Math.Min(1, (force - limit) / limit) : 0;
+                var tau = slipTarget > wheelslip ? 0.5 : 0.1;
+                wheelslip += (slipTarget - wheelslip) * System.Math.Min(1, sub / tau);
+                if (wheelslip < 0.01 && slipTarget == 0)
+                    wheelslip = 0;
+                if (wheelslip > 0)
+                {
+                    slipSeconds += sub;
+                    wheelDamage += wheelslip * 10 * sub;
+                }
+                var appliedThrottle = maxForce > 1 ? System.Math.Min(force, limit) / maxForce : 0;
+                train.Step(appliedThrottle, output.TrainBrake, output.LocoBrake, sub);
+            }
+        }
+        var expectedDistance = sandMax > 1 ? 500 : 300;
+        Assert.True(train.Position >= expectedDistance, $"only went {train.Position:F0} m");
+        Assert.True(wheelDamage < 0.5, $"burned {wheelDamage:F2} wheel HP ({slipSeconds:F1} s slipping)");
+        Assert.True(slipSeconds < 1.5, $"slipped {slipSeconds:F1} s");
     }
 
     [Fact]
@@ -593,5 +791,44 @@ public class GradeStartTests
         }
         Assert.Equal(CantMove.Grip, controller.CantMove);
         Assert.True(ticks < 4 * 30, $"{ticks / 4.0:F0} s");
+    }
+
+    [Fact]
+    public void ManualLapIndependentAppliesLapsAndReleasesToTargetPressure()
+    {
+        // Released: always Running (0.25).
+        Assert.Equal(ManualLapIndependent.Running, ManualLapIndependent.Handle(0, 0));
+        Assert.Equal(ManualLapIndependent.Running, ManualLapIndependent.Handle(0, 3.1));
+        // Partial demand (0.5 -> 1.55 bar): applies below target, laps in band, releases above.
+        Assert.Equal(ManualLapIndependent.SlowApplication, ManualLapIndependent.Handle(0.5, 0));
+        Assert.Equal(ManualLapIndependent.SlowApplication, ManualLapIndependent.Handle(0.5, 1.3));
+        Assert.Equal(ManualLapIndependent.Lap, ManualLapIndependent.Handle(0.5, 1.55));
+        Assert.Equal(ManualLapIndependent.Running, ManualLapIndependent.Handle(0.5, 2.0));
+        // Full demand: applies until full, then laps to hold.
+        Assert.Equal(ManualLapIndependent.SlowApplication, ManualLapIndependent.Handle(1.0, 2.5));
+        Assert.Equal(ManualLapIndependent.Lap, ManualLapIndependent.Handle(1.0, 3.05));
+    }
+
+    [Fact]
+    public void LightEngineWithManualLapIndependentBrakesEarlierForSlowApplication()
+    {
+        var b = new TrackGraphBuilder();
+        b.AddTrack(2000, new MapPoint(0, 0), new MapPoint(2000, 0));
+        var world = new FakeWorld(b.Build());
+        double TargetAt(bool manualLap)
+        {
+            var train = new NetworkTrain(world, new TrackPosition(0, 1500), TrackDirection.Forward, 12);
+            train.Physics.Speed = 10;
+            var eng = new Engineer();
+            eng.GoTo(new Waypoint(new TrackPosition(0, 1620)));
+            var s = train.State();
+            s.Controls.HasTrainBrake = false;
+            s.Controls.ManualLapLocoBrake = manualLap;
+            eng.Tick(0.2, s, world);
+            return eng.TargetSpeed;
+        }
+        var stock = TargetAt(false);
+        var s6 = TargetAt(true);
+        Assert.True(s6 < stock - 1.5, $"S-6 target {s6:F2} vs stock {stock:F2}");
     }
 }

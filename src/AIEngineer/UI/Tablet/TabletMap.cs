@@ -572,8 +572,9 @@ namespace AIEngineer.UI.Tablet
                 return;
             DrawMarks(world, page);
             DrawTitle(page);
-            DrawTabs(book, page, world);
-            DrawColumn(book, page, world);
+            var panelTop = pick != null ? MapH - PanelHeight(verbs.Count) : MapH - 60f;
+            DrawTabs(book, page, world, panelTop);
+            DrawColumn(book, page, world, panelTop);
             if (pick != null)
                 bottomShown = DrawPanel(world);
             else
@@ -633,29 +634,33 @@ namespace AIEngineer.UI.Tablet
             }
         }
 
-        /// <summary>Nine station tabs at a time, in the booklet's order, with ▲ and ▼ for the sets before and after.</summary>
-        private static void DrawTabs(Booklet book, BookletPage page, World world)
+        /// <summary>Station tabs down the left edge, adapting page size when a tall bottom panel is open so ▲/▼ and every station stay reachable.</summary>
+        private static void DrawTabs(Booklet book, BookletPage page, World world, float panelTop)
         {
-            var sets = book.TabSets(Per);
+            // Reserve room for ▲ (y=16..68) and ▼ (52 px) above panelTop - 4.
+            var visiblePer = Math.Max(1, Math.Min(Per, (int)((panelTop - 4f - 16f - 58f - 52f) / 58f)));
+            var sets = book.TabSets(visiblePer);
             tabSet = Mathf.Clamp(tabSet, 0, Math.Max(0, sets - 1));
             if (Button(S(16, 16, 104, 52), "▲", Plate, tabSet > 0))
             {
                 tabSet--;
                 Changed();
             }
-            var list = book.TabSet(tabSet, Per);
-            for (var i = 0; i < Per; i++)
+            var list = book.TabSet(tabSet, visiblePer);
+            for (var i = 0; i < visiblePer; i++)
             {
                 if (i >= list.Count)
                     continue;
+                var y = 16 + 58 * (i + 1);
                 var st = list[i];
-                var r = S(16, 16 + 58 * (i + 1), 104, 52);
+                var r = S(16, y, 104, 52);
                 var onOverview = !page.IsRoute && page.Station == st.Code && st.Overview == page;
                 var inYard = !page.IsRoute && page.Station == st.Code && !onOverview;
                 if (Button(r, onOverview ? Tint(st.Code, Brass2) : inYard ? Tint(st.Code, Brass2) : st.Code, onOverview ? Here : inYard ? PlateOn : Plate) && !onOverview)
                     Nav(book, PageRef.Overview(st.Code), world);
             }
-            if (Button(S(16, 16 + 58 * (Per + 1), 104, 52), "▼", Plate, tabSet < sets - 1))
+            var downY = 16 + 58 * (visiblePer + 1);
+            if (Button(S(16, downY, 104, 52), "▼", Plate, tabSet < sets - 1))
             {
                 tabSet++;
                 Changed();
@@ -668,8 +673,8 @@ namespace AIEngineer.UI.Tablet
             Changed();
         }
 
-        /// <summary>The column down the right edge; every plate in the same place on every page.</summary>
-        private static void DrawColumn(Booklet book, BookletPage page, World world)
+        /// <summary>The column down the right edge; every plate in the same place on every page, stopping clear of the bottom panel.</summary>
+        private static void DrawColumn(Booklet book, BookletPage page, World world, float panelTop)
         {
             const float x = MapW - 16 - 128;
             if (Button(S(x, 16, 60, 60), "+", Plate, view.Scale < PageView.MaxScale - 1e-6))
@@ -704,14 +709,26 @@ namespace AIEngineer.UI.Tablet
                 Changed();
             }
             var ay = 238 + LetterRows * 66 + 78;
-            if (Button(S(x, ay, 60, 60), "◀", Plate))
-                Step(-1, 0);
-            if (Button(S(x + 68, ay, 60, 60), "▶", Plate))
-                Step(1, 0);
-            if (Button(S(x, ay + 66, 60, 60), "▲", Plate))
-                Step(0, -1);
-            if (Button(S(x + 68, ay + 66, 60, 60), "▼", Plate))
-                Step(0, 1);
+            if (ay + 60 <= panelTop - 4)
+            {
+                if (Button(S(x, ay, 60, 60), "◀", Plate))
+                    Step(-1, 0);
+                if (Button(S(x + 68, ay, 60, 60), "▶", Plate))
+                    Step(1, 0);
+            }
+            if (ay + 66 + 60 <= panelTop - 4)
+            {
+                if (Button(S(x, ay + 66, 60, 60), "▲", Plate))
+                    Step(0, -1);
+                if (Button(S(x + 68, ay + 66, 60, 60), "▼", Plate))
+                    Step(0, 1);
+            }
+            if (pick == null && !page.IsRoute && ay + 132 + 64 <= panelTop - 4)
+            {
+                var bowl = Dispatch.BowlForPage(world.Network, page.Station, page.Yard);
+                if (bowl != null && Button(S(x, ay + 132, 128, 64), $"Sort {bowl.Name}", Plate))
+                    TabletUi.OpenSort(bowl);
+            }
         }
 
         /// <summary>A step with an arrow: three fifths of what the map shows.</summary>
@@ -740,6 +757,8 @@ namespace AIEngineer.UI.Tablet
         /// <summary>The part of the map no plate is over (canvas pixels), where a press picks on the map; empty off the map page.</summary>
         public static Rect PressArea { get; private set; }
 
+        public static void ClearPressArea() => PressArea = default;
+
         /// <summary>A press on the map, at a canvas point: picks what is there, or opens a station or a yard.</summary>
         public static void PressAt(Vector2 canvas)
         {
@@ -754,7 +773,7 @@ namespace AIEngineer.UI.Tablet
             var ly = canvas.y - MapY;
             // A press on the tabs, the column, or the panel is theirs, between their plates too.
             if (lx < 0 || ly < 0 || lx > MapW || ly > MapH || bottomShown.Contains(canvas)
-                || S(16, 16, 104, 58 * (Per + 2)).Contains(canvas) || S(MapW - 16 - 128, 16, 128, 630).Contains(canvas))
+                || S(16, 16, 104, 58 * (Per + 2)).Contains(canvas) || S(MapW - 16 - 128, 16, 128, 704).Contains(canvas))
                 return;
             try
             {
@@ -857,6 +876,9 @@ namespace AIEngineer.UI.Tablet
                 list.Add(new Verb { Label = $"Leave my {Plural(n, "car")} here", Do = () => TabletUi.Order($"Leave {Plural(n, "car")} on {name}", after, s => Give(s, new Waypoint(p, WaypointAction.Uncouple) { CarCount = n, Label = name })) });
             if (ConductorDesk.CanPlan)
                 list.Add(new Verb { Label = "Conductor", Always = true, Do = () => PlanConductor(world, named, p, name) });
+            var bowl = Dispatch.BowlForTrack(network, p.Track);
+            if (bowl != null)
+                list.Add(new Verb { Label = $"Sort {bowl.Name}", Always = true, Do = () => TabletUi.OpenSort(bowl) });
             var room = named != null ? $", {named.Length:F0} m{(named.DeadEnd ? ", stub" : "")}" : "";
             Set(new Pick { Kind = PickKind.Track, At = p, Name = $"<b>{name}</b>{room}" }, list);
             Changed();
@@ -911,6 +933,9 @@ namespace AIEngineer.UI.Tablet
                 var j = job;
                 list.Add(new Verb { Label = $"Work {j.ID}", Do = () => WorkJobs(world, new List<Job> { j }) });
             }
+            var bowl = Dispatch.BowlForTrack(network, p.Track);
+            if (bowl != null)
+                list.Add(new Verb { Label = $"Sort {bowl.Name}", Always = true, Do = () => TabletUi.OpenSort(bowl) });
             Set(new Pick { Kind = PickKind.Cut, At = p, Cut = cut, Name = $"<b>{cut.Short}</b>{(cut.Jobs != null ? ", " + cut.Jobs : "")}" }, list);
             Changed();
         }
@@ -957,6 +982,12 @@ namespace AIEngineer.UI.Tablet
             var ids = string.Join(", ", views.Select(v => v.Id));
             TabletUi.Order($"working {ids}", add, s =>
             {
+                // Added to the queue behind a run: worked when it ends, the run kept.
+                if (add && s.Jobs != null)
+                {
+                    s.Jobs.Then(views);
+                    return;
+                }
                 if (s.Jobs != null)
                     s.Jobs.Cancel(s, "it was handed other jobs");
                 s.Jobs = null;
@@ -1010,11 +1041,16 @@ namespace AIEngineer.UI.Tablet
             Changed();
         }
 
+        private static float PanelHeight(int verbCount)
+        {
+            var rows = Math.Max(1, Math.Min(2, (verbCount + 5) / 6));
+            return 8 + 60 + 6 + rows * 88;
+        }
+
         /// <summary>The pick's name and its orders, over the bottom of the map; a press sends one. Returns the panel's rect.</summary>
         private static Rect DrawPanel(World world)
         {
-            var rows = Math.Min(1, (verbs.Count + 5) / 6);
-            var height = 8 + 60 + 6 + rows * 88;
+            var height = PanelHeight(verbs.Count);
             var r = S(0, MapH - height, MapW, height);
             Box(r, Panel);
             var forLoco = pick.Kind == PickKind.Loco;
@@ -1041,7 +1077,7 @@ namespace AIEngineer.UI.Tablet
                 Changed();
             }
             var w = (MapW - 20 - 8 * 5) / 6f;
-            for (var i = 0; i < Math.Min(6, verbs.Count); i++)
+            for (var i = 0; i < Math.Min(12, verbs.Count); i++)
             {
                 var v = verbs[i];
                 var cell = new Rect(r.x + 10 + (i % 6) * (w + 8), r.y + 8 + 60 + 6 + (i / 6) * 88, w, 80);

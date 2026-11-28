@@ -16,6 +16,20 @@ namespace AIEngineer.Game
         private static PropertyInfo wetness;
         private static MethodInfo toNumber;
         private static PropertyInfo value;
+        private static float cachedWetness;
+        private static float cachedAt = float.NegativeInfinity;
+
+        /// <summary>The weather's wetness, refreshed at most every two seconds so ticks never allocate.</summary>
+        public static float WetnessCached()
+        {
+            var now = UnityEngine.Time.unscaledTime;
+            if (now - cachedAt >= 2f)
+            {
+                cachedWetness = Wetness();
+                cachedAt = now;
+            }
+            return cachedWetness;
+        }
 
         public static float Wetness()
         {

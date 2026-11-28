@@ -15,11 +15,32 @@ namespace AIEngineer.Game
         public int Track;
         public string Id;
         public string Part;
+        public string YardId;
+        public string SubYard;
+        public string TrackType;
         public double Length;
         public Vector2 Middle;
 
         /// <summary>Whether one end is a buffer stop: a stub, which cars should go into first.</summary>
         public bool DeadEnd;
+    }
+
+    /// <summary>A classification bowl (an interchange yard, or a station's freight sub-yard) that can be sorted.</summary>
+    internal sealed class SortableBowl
+    {
+        /// <summary>Display name ("WI", "NEI", "HB-C", "MF-B").</summary>
+        public string Name;
+
+        /// <summary>Station or interchange yard ID ("WI", "HB", "MF").</summary>
+        public string YardId;
+
+        /// <summary>Sub-yard letter if this is a stock station sub-yard ("C", "B"); null for an interchange whole.</summary>
+        public string SubYard;
+
+        public bool Added;
+
+        /// <summary>Bowl tracks in display order.</summary>
+        public readonly List<NamedTrack> Tracks = new List<NamedTrack>();
     }
 
     /// <summary>A yard's named tracks, by the game's track IDs ("HB-C3L").</summary>
@@ -151,9 +172,15 @@ namespace AIEngineer.Game
         /// <summary>The track types of the stock map's yards (storage, loading, in, out, parking, passengers' and the rest).</summary>
         private static readonly HashSet<string> StockTypes = new HashSet<string> { "S", "L", "I", "O", "P", "M", "SP", "LP", "D" };
 
+        /// <summary>Track types excluded from freight yard classification bowls (loco parking, passenger platforms, turntables/depots).</summary>
+        private static readonly HashSet<string> NonFreightTypes = new HashSet<string> { "P", "SP", "LP", "D" };
+
+        /// <summary>Legacy Interchange Yards (<= 0.1.4) sub-yard codes filed under nearby stations ("MF-WI-01-X", "IME-NEI-01-X").</summary>
+        private static readonly HashSet<string> LegacyInterchangeSubYards = new HashSet<string>(StringComparer.Ordinal) { "WI", "NEI" };
+
         /// <summary>
-        /// The yard a track is listed under: its station's, or for a type the
-        /// stock map doesn't use (an added interchange's), its sub-yard's.
+        /// The yard a track is listed under: its station's, or for Interchange Yards
+        /// tracks (type X at WI / NEI), its interchange code.
         /// </summary>
         private static string YardKey(TrackID id, out bool added)
         {
@@ -162,8 +189,20 @@ namespace AIEngineer.Game
             var parts = id.FullID.Split('-');
             if (parts.Length == 4 && !StockTypes.Contains(parts[3]) && !string.IsNullOrEmpty(parts[1]))
             {
-                added = true;
-                return parts[1];
+                // Interchange Yards 0.1.4 and earlier filed tracks as sub-yard "WI"/"NEI" under the nearby station ("MF-WI-01-X", "IME-NEI-01-X").
+                if (parts[3] == "X" && LegacyInterchangeSubYards.Contains(parts[1]))
+                {
+                    added = true;
+                    return parts[1];
+                }
+                // Interchange Yards 0.1.5+ uses its own yard code ("WI-A-01-X", "NEI-A-01-X").
+                if (parts[3] == "X" && LegacyInterchangeSubYards.Contains(id.yardId))
+                {
+                    added = true;
+                    return id.yardId;
+                }
+                // Any other custom track type stays under its station's yardId (added = false) so mixed stock+custom
+                // sub-yards (e.g. FOO-A-01-S and FOO-A-02-X) stay together in FOO-A while FOO-A and FOO-B stay separate.
             }
             return id.yardId;
         }
@@ -185,6 +224,9 @@ namespace AIEngineer.Game
                 if (id == null || id.IsGeneric() || string.IsNullOrEmpty(id.yardId))
                     continue;
                 var key = YardKey(id, out var added);
+                var parts = id.FullID.Split('-');
+                var subYard = parts.Length == 4 ? parts[1] : "";
+                var trackType = parts.Length == 4 ? parts[3] : "";
                 // An added sub-yard is keyed apart, so a station of the same name can't take its tracks.
                 var slot = added ? "+" + key : key;
                 if (!byId.TryGetValue(slot, out var yard))
@@ -195,6 +237,9 @@ namespace AIEngineer.Game
                     Track = t,
                     Id = id.FullDisplayID,
                     Part = id.TrackPartOnly,
+                    YardId = key,
+                    SubYard = subYard,
+                    TrackType = trackType,
                     Length = length,
                     Middle = network.MapPointAt(new TrackPosition(t, length / 2)),
                     DeadEnd = network.Graph.Links(t, TrackEnd.Start).Length == 0 || network.Graph.Links(t, TrackEnd.End).Length == 0,
@@ -213,6 +258,114 @@ namespace AIEngineer.Game
             var list = new List<Yard>(byId.Values);
             list.Sort((a, b) => string.CompareOrdinal(a.Id, b.Id));
             return list;
+        }
+
+        /// <summary>Representative track index (nearest the yard's middle) for every named yard, for corridor distance sorting.</summary>
+        public static Dictionary<string, int> YardRepTracks(Network network)
+        {
+            var map = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var yard in AllYards(network))
+            {
+                if (yard.Tracks.Count == 0)
+                    continue;
+                var best = yard.Tracks[0];
+                var bestD = (best.Middle - yard.Centre).sqrMagnitude;
+                for (var i = 1; i < yard.Tracks.Count; i++)
+                {
+                    var d = (yard.Tracks[i].Middle - yard.Centre).sqrMagnitude;
+                    if (d < bestD)
+                    {
+                        bestD = d;
+                        best = yard.Tracks[i];
+                    }
+                }
+                map[yard.Id] = best.Track;
+            }
+            return map;
+        }
+
+        /// <summary>
+        /// The sortable yard bowl containing <paramref name="trackIndex"/> (an interchange yard as a whole,
+        /// or a station sub-yard's freight tracks); null if the track isn't in a bowl of at least two tracks.
+        /// </summary>
+        public static SortableBowl BowlForTrack(Network network, int trackIndex)
+        {
+            if (network == null)
+                return null;
+            foreach (var yard in AllYards(network))
+            {
+                var found = yard.Tracks.Find(t => t.Track == trackIndex);
+                if (found == null)
+                    continue;
+                var bowl = BuildBowl(yard, found.SubYard);
+                return bowl != null && bowl.Tracks.Exists(t => t.Track == trackIndex) ? bowl : null;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The sortable yard bowl for a station booklet page (e.g. WI-A, NEI-A, HB-C, MF-B);
+        /// null on the route map or an overview page that has no single sub-yard bowl.
+        /// </summary>
+        public static SortableBowl BowlForPage(Network network, string stationCode, string yardLetter)
+        {
+            if (network == null || string.IsNullOrEmpty(stationCode))
+                return null;
+            var all = AllYards(network);
+            // Direct match on an interchange yard (WI, NEI) or station.
+            var yard = all.Find(y => string.Equals(y.Id, stationCode, StringComparison.Ordinal));
+            if (yard == null)
+                return null;
+            if (yard.Added)
+            {
+                var multiSubYard = HasMultipleSubYards(yard);
+                if (multiSubYard && string.IsNullOrEmpty(yardLetter))
+                    return null;
+                return BuildBowl(yard, multiSubYard ? yardLetter : null);
+            }
+            if (string.IsNullOrEmpty(yardLetter))
+                return null;
+            return BuildBowl(yard, yardLetter);
+        }
+
+        private static bool HasMultipleSubYards(Yard yard)
+        {
+            string firstSub = null;
+            foreach (var t in yard.Tracks)
+            {
+                if (string.IsNullOrEmpty(t.SubYard))
+                    continue;
+                if (firstSub == null)
+                    firstSub = t.SubYard;
+                else if (!string.Equals(firstSub, t.SubYard, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
+        }
+
+        private static SortableBowl BuildBowl(Yard yard, string subYard)
+        {
+            // Keep sub-yards separate whenever the yard has tracks across multiple sub-yards
+            // (so custom non-stock stations like FOO-A-01-X + FOO-B-01-X never collapse into one bowl,
+            // while single-sub-yard interchanges WI and NEI still present as one bowl).
+            var multiSubYard = HasMultipleSubYards(yard);
+            var filterBySubYard = (!yard.Added || multiSubYard) && !string.IsNullOrEmpty(subYard);
+            var bowl = new SortableBowl
+            {
+                YardId = yard.Id,
+                SubYard = filterBySubYard ? subYard : null,
+                Added = yard.Added,
+                Name = filterBySubYard ? $"{yard.Id}-{subYard}" : yard.Id,
+            };
+            foreach (var t in yard.Tracks)
+            {
+                if (filterBySubYard && !string.Equals(t.SubYard, subYard, StringComparison.Ordinal))
+                    continue;
+                if (!yard.Added && NonFreightTypes.Contains(t.TrackType))
+                    continue;
+                bowl.Tracks.Add(t);
+            }
+            return bowl.Tracks.Count >= 2 ? bowl : null;
         }
 
         /// <summary>The standing cuts on the network, nearest to <paramref name="from"/> first, within a radius.</summary>

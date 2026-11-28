@@ -137,6 +137,8 @@ namespace AIEngineer
                 UI.Tablet.TabletUi.ResetForUnload();
                 UI.Tablet.TabletPages.ResetForUnload();
                 Dispatch.ResetForUnload();
+                SortRun.ResetForUnload();
+                Session.CarProtection.ResetForUnload();
                 Service.ResetForUnload();
             }
             catch (Exception e)

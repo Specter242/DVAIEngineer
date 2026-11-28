@@ -64,6 +64,9 @@ namespace AIEngineer.Core.Driving
         /// <summary>Whether a loco's driven wheels are spinning on the rail.</summary>
         public bool Slipping;
 
+        /// <summary>Worst loco wheelslip severity (0..1); 0 when unknown or not slipping.</summary>
+        public double SlipLevel;
+
         /// <summary>Traction motor temperature, °C; 0 for a loco without traction motors.</summary>
         public double MotorHeat;
 
@@ -73,8 +76,18 @@ namespace AIEngineer.Core.Driving
         /// <summary>The traction generator's current as a share of its limit; 0 when unknown.</summary>
         public double AmpsShare;
 
-        /// <summary>The lead loco's driving force as a share of what the rail will take before its wheels slip; 0 when unknown.</summary>
+        /// <summary>The most grip-limited loco's driving force as a share of what the rail will take before its wheels slip; 0 when unknown.</summary>
         public double GripShare;
+
+        /// <summary>Optional cap on the final-stop deceleration counted on, m/s² (0 uses the tuning default); used when braking a short cut on the independent alone.</summary>
+        public double FinalDeceleration;
+        /// <summary>
+        /// The same driving force as a share of what the rail would take without
+        /// sand (0 when unknown, in which case <see cref="GripShare"/> stands in):
+        /// lets the sander turn on before the rail is exceeded and stay on without
+        /// chattering once sand raises adhesion.
+        /// </summary>
+        public double UnsandedGripShare;
     }
 
     /// <summary>The train's controls as the engineer finds them.</summary>
@@ -93,6 +106,47 @@ namespace AIEngineer.Core.Driving
         /// eased while moving; the loco and dynamic brakes do the fine work.
         /// </summary>
         public bool SlowAir;
+
+        /// <summary>
+        /// Short cut under slow air: work the loco's independent brake alone while it holds
+        /// the braking curve, and bring in the train brake automatically if the independent
+        /// brake saturates and the train still falls behind the curve before a stop.
+        /// </summary>
+        public bool PreferIndependent;
+
+        /// <summary>
+        /// The loco's independent brake is manual-lap (Realistic Brakes' American
+        /// E-T S-6: running, lap, slow application, quick application), so it
+        /// builds pressure more slowly than a self-lapping independent.
+        /// </summary>
+        public bool ManualLapLocoBrake;
+    }
+
+    /// <summary>
+    /// Maps a desired independent brake share (0 to 1) onto Realistic Brakes'
+    /// S-6 manual-lap independent positions (0.25 running, 0.50 lap, 0.75 slow
+    /// application) from the engine's current brake cylinder gauge pressure.
+    /// </summary>
+    public static class ManualLapIndependent
+    {
+        public const double Running = 0.25;
+        public const double Lap = 0.50;
+        public const double SlowApplication = 0.75;
+        public const double MaxBar = 3.1;
+
+        public static double Handle(double level, double cylinderBar, double maxBar = MaxBar)
+        {
+            if (level <= 0.01)
+                return Running;
+            if (level >= 0.98)
+                return cylinderBar < maxBar - 0.15 ? SlowApplication : Lap;
+            var target = Math.Max(0, Math.Min(1, level)) * maxBar;
+            if (cylinderBar < target - 0.12)
+                return SlowApplication;
+            if (cylinderBar > target + 0.15)
+                return Running;
+            return Lap;
+        }
     }
 
     public sealed class ControlTuning
@@ -141,22 +195,37 @@ namespace AIEngineer.Core.Driving
         public double StallRest = 60;
 
         /// <summary>
-        /// With the wheels slipping the throttle comes back by this much a
+        /// With the wheels slipping the throttle drops by
+        /// <see cref="SlipInitialCut"/> at once and <see cref="SlipCut"/> a
         /// second until they bite, stays at or under where they did for
-        /// <see cref="SlipHold"/> s, then rises only by
-        /// <see cref="SlipRecovery"/> a second, feeling for what the rail will
-        /// take. The sand runs for <see cref="SandFor"/> s after a slip; a slip
-        /// within <see cref="SandRepeatWithin"/> s of the sand ending doubles
-        /// that, up to <see cref="SandMost"/>, so wet rail keeps it on and dry
-        /// rail spends little. Notching on up through a slip only polishes the
-        /// rail.
+        /// <see cref="SlipHold"/> s (doubling up to <see cref="SlipHoldMost"/>
+        /// when another slip comes within <see cref="SlipRepeatWithin"/> s of
+        /// the last hold ending, so the engineer stops slamming back into a
+        /// notch the rail won't take), then rises only by
+        /// <see cref="SlipRecovery"/> a second. The sand runs for
+        /// <see cref="SandFor"/> s after a slip; a slip within
+        /// <see cref="SandRepeatWithin"/> s of the sand ending doubles that,
+        /// up to <see cref="SandMost"/>.
         /// </summary>
-        public double SlipCut = 0.5;
-        public double SlipHold = 3;
-        public double SlipRecovery = 0.06;
-        public double SandFor = 4;
-        public double SandRepeatWithin = 6;
+        public double SlipInitialCut = 0.08;
+        public double SlipCut = 0.6;
+        public double SlipHold = 4;
+        public double SlipHoldMost = 16;
+        public double SlipRepeatWithin = 15;
+        public double SlipRecovery = 0.025;
+        public double SandFor = 5;
+        public double SandRepeatWithin = 8;
         public double SandMost = 30;
+
+        /// <summary>
+        /// Proactive sanding on the unsanded grip share (at any speed while
+        /// under power): turns on at <see cref="SandGripOn"/> before a notch
+        /// breaks adhesion and stays on until it falls under
+        /// <see cref="SandGripOff"/>, so sand neither chatters nor quits while
+        /// pulling hard at road speed.
+        /// </summary>
+        public double SandGripOn = 0.72;
+        public double SandGripOff = 0.55;
 
         /// <summary>
         /// Traction motors over <see cref="MotorEaseFrom"/>, °C, get less
@@ -182,17 +251,33 @@ namespace AIEngineer.Core.Driving
         /// <summary>
         /// Over this share of the rail's grip the throttle opens no further,
         /// and over <see cref="GripMost"/> it comes back by
-        /// <see cref="GripCut"/> a second: a crew feels for the rail rather than
-        /// slipping and shutting off. On wet rail a DE2 starting 302 t put 150 kN
+        /// <see cref="GripCut"/> a second and holds for <see cref="GripHold"/>
+        /// s so a notched throttle doesn't bounce right back into the notch
+        /// that exceeded grip: a crew feels for the rail rather than slipping
+        /// and shutting off. On wet rail a DE2 starting 302 t put 150 kN
         /// against 84 kN of grip, slipped, shut off, and rolled back (in game,
         /// 2026-11-19).
         /// </summary>
-        public double GripEaseFrom = 0.85;
-        public double GripMost = 0.97;
-        public double GripCut = 0.15;
+        public double GripEaseFrom = 0.78;
+        public double GripMost = 0.90;
+        public double GripCut = 0.25;
+        public double GripHold = 3;
+
+        /// <summary>
+        /// Size of one throttle step assumed when checking whether the next
+        /// notch would exceed <see cref="GripNextMost"/> once moving and past
+        /// notch 1: on a notched diesel (DE2 1/11, DE6/DH4 1/8) going from
+        /// notch 2 to notch 3 adds half as much force again, so holding only
+        /// at a fixed share still lets the next notch jump straight into wheel
+        /// slip. Not applied at standstill or notch 1, where a diesel's base
+        /// step isn't proportional to throttle (a DE2 at 50 % grip on notch 1
+        /// would otherwise freeze at notch 1 and roll back on wet 1.6 %).
+        /// </summary>
+        public double GripStep = 0.09;
+        public double GripNextMost = 0.98;
 
         /// <summary>Taking up power against the brakes stops at this share of the grip: past it the wheels would slip once the brakes are off.</summary>
-        public double GripTakeUp = 0.8;
+        public double GripTakeUp = 0.75;
 
         /// <summary>
         /// Starting uphill from at least this grade with the train brake on,
@@ -422,10 +507,15 @@ namespace AIEngineer.Core.Driving
         private double restUntil = double.NegativeInfinity;
         // How long the loco brake has had the last meters without slowing the train.
         private double notSlowingFor;
+        // Under PreferIndependent, how long the loco brake has been saturated at full.
+        private double independentSaturatedFor;
         // The throttle the wheels last bit at after slipping, until when it is kept to, and until when the sand runs.
         private double slipCeiling = 1;
+        private double slipHold;
         private double sandFor;
+        private double lastSlipLevel;
         private bool wasSlipping;
+        private bool gripSanding;
         private double slipUntil = double.NegativeInfinity;
         private double sandUntil = double.NegativeInfinity;
 
@@ -503,7 +593,10 @@ namespace AIEngineer.Core.Driving
                 return;
             tryClock += input.Dt;
             odometer += speed * input.Dt;
-            if (input.Slipping || input.GripShare > t.GripEaseFrom)
+            var gripProjected = speed >= 0.25 && throttle >= 0.15 && input.GripShare > 0
+                ? input.GripShare * (throttle + t.GripStep) / throttle
+                : input.GripShare;
+            if (input.Slipping || input.GripShare > t.GripEaseFrom || gripProjected > t.GripNextMost)
                 gripBound += input.Dt;
             else if (Resting || throttle >= 0.9 || input.AmpsShare > t.AmpsEaseFrom || input.MotorHeat > t.MotorEaseFrom)
                 powerBound += input.Dt;
@@ -549,8 +642,12 @@ namespace AIEngineer.Core.Driving
             targetRate = 0;
             curveWas = false;
             notSlowingFor = 0;
+            independentSaturatedFor = 0;
             slipCeiling = 1;
+            slipHold = 0;
+            lastSlipLevel = 0;
             wasSlipping = false;
+            gripSanding = false;
             gradeStart = GradeStart.None;
         }
 
@@ -572,7 +669,12 @@ namespace AIEngineer.Core.Driving
             double train = 0;
             if (caps.HasTrainBrake)
             {
-                if (caps.SlowAir)
+                if (caps.PreferIndependent && !firm && Math.Abs(speed) <= Tuning.HoldSetAbove && airSet <= 0)
+                {
+                    // Standing or nearly stopped on an independent-only cut: hold on the loco brake alone.
+                    train = 0;
+                }
+                else if (caps.SlowAir)
                 {
                     var moving = Math.Abs(speed);
                     var wanted = moving > Tuning.HoldFullAbove ? 1
@@ -604,9 +706,14 @@ namespace AIEngineer.Core.Driving
             clock += input.Dt;
             WaitingForAir = false;
             TakingUpPower = false;
-            var slow = caps.SlowAir && caps.HasTrainBrake;
+            var slow = caps.SlowAir && caps.HasTrainBrake && !caps.PreferIndependent;
             if (!caps.HasTrainBrake)
                 airSet = 0;
+            // When PreferIndependent is active, stay on the loco brake alone unless the train falls
+            // clearly behind a braking curve (independent brake couldn't hold the deceleration); once
+            // airSet is engaged for safety, hold it under slow-air rules until stopped/clear.
+            if (caps.PreferIndependent && caps.HasTrainBrake && airSet > 0)
+                slow = true;
             var overNow = speed - input.Target;
             if (!double.IsNaN(lastOver) && input.Dt > 0)
                 overRate += ((overNow - lastOver) / input.Dt - overRate) * Math.Min(1, input.Dt / 2.0);
@@ -645,6 +752,7 @@ namespace AIEngineer.Core.Driving
                 || (input.Target <= 0.01 && Math.Abs(speed) < 0.3 && (input.Halt || double.IsPositiveInfinity(input.ToStop))))
             {
                 notSlowingFor = 0;
+                independentSaturatedFor = 0;
                 return HoldStopped(caps, speed, input.Uphill);
             }
 
@@ -686,8 +794,10 @@ namespace AIEngineer.Core.Driving
                 airSet = 0;
                 airSetAt = clock;
             }
-            var creep = slow ? t.AirCreepSpeed : t.CreepSpeed;
+            var creep = slow || caps.PreferIndependent ? t.AirCreepSpeed : t.CreepSpeed;
             var finalDecel = slow ? t.AirFinalDeceleration : t.FinalDeceleration;
+            if (input.FinalDeceleration > 0 && input.FinalDeceleration < finalDecel)
+                finalDecel = input.FinalDeceleration;
             if (!input.Halt && !double.IsPositiveInfinity(input.ToStop) && input.ToStop > t.FinalStopDistance)
                 target = Math.Max(target, Math.Min(creep, input.ToStop));
 
@@ -703,6 +813,7 @@ namespace AIEngineer.Core.Driving
                 throttle = 0;
                 integral = 0;
                 braking = true;
+                gripSanding = false;
                 if (slow)
                 {
                     // Slow air: the last meters are the loco brake's; a train application now would
@@ -725,7 +836,22 @@ namespace AIEngineer.Core.Driving
                         airSetAt = clock;
                     }
                 }
-                output.TrainBrake = slow ? airSet : caps.HasTrainBrake ? (behindTheCurve ? 1 : t.FinalTrainBrakeWithCars) : 0;
+                output.TrainBrake = slow ? airSet : caps.HasTrainBrake && !caps.PreferIndependent ? (behindTheCurve ? 1 : t.FinalTrainBrakeWithCars) : 0;
+                // Under PreferIndependent, give the independent brake a moment to bite; if it stays
+                // saturated without slowing enough to stop at the mark (or we already passed it),
+                // bring in the train brake automatically before overshooting the track.
+                if (caps.PreferIndependent && caps.HasTrainBrake && !slow)
+                {
+                    independentSaturatedFor += input.Dt;
+                    var neededDecel = speed > 0 ? speed * speed / (2 * Math.Max(1.0, input.ToStop - t.FinalStopDistance)) : 0;
+                    if (speed > 0.5 && (input.ToStop <= 0
+                        || (independentSaturatedFor >= 1.5 && (-acceleration < neededDecel || behindTheCurve))))
+                    {
+                        airSet = Math.Max(airSet, behindTheCurve || input.ToStop <= 0 ? 1 : t.AirFirstSet);
+                        airSetAt = clock;
+                        output.TrainBrake = airSet;
+                    }
+                }
                 // With cars, the train brake stops the train and the loco brake holds it once it stands;
                 // a stop the train brake isn't making in time (behind the curve, past the mark, not
                 // slowing) gets all the brake there is.
@@ -735,7 +861,7 @@ namespace AIEngineer.Core.Driving
                 var short_ = slow
                     ? behindTheCurve || input.ToStop <= 0 || notSlowingFor > t.AirFinalPatience
                     : input.ToStop <= 0 || speed - input.Target > t.AllBrakeBehind;
-                output.LocoBrake = caps.HasTrainBrake && Math.Abs(speed) >= t.StandingBelow && !short_ ? t.LocoBrakeWithCars : 1;
+                output.LocoBrake = caps.HasTrainBrake && !caps.PreferIndependent && Math.Abs(speed) >= t.StandingBelow && !short_ ? t.LocoBrakeWithCars : 1;
                 return output;
             }
             notSlowingFor = 0;
@@ -746,6 +872,7 @@ namespace AIEngineer.Core.Driving
             if (braking ? -shortfall < brakeOff : -shortfall < brakeOn)
             {
                 braking = false;
+                independentSaturatedFor = 0;
                 Watch(input, speed);
                 if (slow && airSet > 0)
                 {
@@ -784,11 +911,31 @@ namespace AIEngineer.Core.Driving
                 throttle = wanted > throttle ? Math.Min(wanted, throttle + t.ThrottleRate * input.Dt) : wanted;
                 if (input.Slipping)
                 {
-                    throttle = Math.Max(0, Math.Min(throttle, throttleWas) - t.SlipCut * input.Dt);
+                    // Once wheelslip is decaying quickly and pull is under the rail limit, the
+                    // wheels are already catching (just smoothing down): hold the cut throttle
+                    // rather than chopping all the way to idle.
+                    var catching = wasSlipping && input.SlipLevel > 0 && lastSlipLevel > 0
+                        && input.SlipLevel < lastSlipLevel * 0.85 && input.GripShare < 1;
+                    if (catching)
+                        throttle = Math.Min(throttle, throttleWas);
+                    else
+                    {
+                        var cut = t.SlipCut * input.Dt + (wasSlipping ? 0 : t.SlipInitialCut);
+                        throttle = Math.Max(0, Math.Min(throttle, throttleWas) - cut);
+                    }
                     slipCeiling = throttle;
-                    slipUntil = clock + t.SlipHold;
                     if (!wasSlipping)
-                        sandFor = clock - sandUntil < t.SandRepeatWithin ? Math.Min(t.SandMost, Math.Max(t.SandFor, sandFor * 2)) : t.SandFor;
+                    {
+                        slipHold = clock - slipUntil < t.SlipRepeatWithin
+                            ? Math.Min(t.SlipHoldMost, Math.Max(t.SlipHold, slipHold * 2))
+                            : t.SlipHold;
+                        sandFor = clock - sandUntil < t.SandRepeatWithin
+                            ? Math.Min(t.SandMost, Math.Max(t.SandFor, sandFor * 2))
+                            : t.SandFor;
+                    }
+                    // If it had to close all the way to idle to catch, don't hold idle long on a grade.
+                    var hold = slipCeiling < 0.05 ? Math.Min(slipHold, 2.0) : slipHold;
+                    slipUntil = clock + hold;
                     sandUntil = clock + sandFor;
                 }
                 else if (slipCeiling < 1)
@@ -799,6 +946,7 @@ namespace AIEngineer.Core.Driving
                     integral = Math.Min(integral, slipCeiling);
                 }
                 wasSlipping = input.Slipping;
+                lastSlipLevel = input.Slipping ? input.SlipLevel : 0;
                 // Hot motors: as much as they can take and no more, however far short the train is.
                 if (input.MotorHeat > t.MotorEaseFrom)
                 {
@@ -809,15 +957,30 @@ namespace AIEngineer.Core.Driving
                         integral = Math.Min(integral, throttle);
                     }
                 }
-                // Near the rail's grip: no more, and just under it, a little less.
-                if (input.GripShare > t.GripEaseFrom && throttle > throttleWas)
-                    throttle = throttleWas;
-                // Back only toward what the rail will take, never all the way off: shut off, a train
-                // on a wet grade rolls back and starts again, and again (in game, 2026-11-19).
-                if (input.GripShare > t.GripMost)
-                    throttle = Math.Max(throttleWas * t.GripEaseFrom / input.GripShare, Math.Min(throttle, throttleWas) - t.GripCut * input.Dt);
-                if (input.GripShare > t.GripEaseFrom)
-                    integral = Math.Min(integral, throttle);
+                // Near the rail's grip (when not already cutting for active slip): no more
+                // (including when the next notch would overshoot GripNextMost once moving),
+                // and past GripMost, ease back and hold so a notched lever doesn't bounce back.
+                if (!input.Slipping)
+                {
+                    var nextGrip = speed >= 0.25 && throttleWas >= 0.15 && input.GripShare > 0
+                        ? input.GripShare * (throttleWas + t.GripStep) / throttleWas
+                        : input.GripShare;
+                    var gripNear = input.GripShare > t.GripEaseFrom || nextGrip > t.GripNextMost;
+                    if (gripNear && throttle > throttleWas)
+                        throttle = throttleWas;
+                    // Back only toward what the rail will take, never all the way off: shut off, a train
+                    // on a wet grade rolls back and starts again, and again (in game, 2026-11-19).
+                    if (input.GripShare > t.GripMost)
+                    {
+                        var backed = Math.Max(throttleWas * t.GripEaseFrom / input.GripShare, Math.Min(throttle, throttleWas) - t.GripCut * input.Dt);
+                        throttle = Math.Min(throttle, backed);
+                        slipCeiling = Math.Min(slipCeiling, throttle);
+                        if (slipUntil < clock + t.GripHold)
+                            slipUntil = clock + t.GripHold;
+                    }
+                    if (gripNear)
+                        integral = Math.Min(integral, throttle);
+                }
                 // Near the generator's limit: no more, and over it, less.
                 if (input.AmpsShare > t.AmpsEaseFrom && throttle > throttleWas)
                     throttle = throttleWas;
@@ -827,9 +990,19 @@ namespace AIEngineer.Core.Driving
                     integral = Math.Min(integral, throttle);
                 if (clock < slipUntil)
                     integral = Math.Min(integral, throttle);
+                var unsandedGrip = Math.Max(input.GripShare, input.UnsandedGripShare);
+                var unsandedNext = throttle >= t.GripStep && unsandedGrip > 0 && wanted > throttle + 0.01
+                    ? unsandedGrip * (throttle + t.GripStep) / throttle
+                    : unsandedGrip;
+                if (throttle <= 0.01)
+                    gripSanding = false;
+                else if (unsandedGrip >= t.SandGripOn || unsandedNext >= t.GripMost)
+                    gripSanding = true;
+                else if (unsandedGrip < t.SandGripOff && unsandedNext < t.SandGripOn)
+                    gripSanding = false;
                 output.Sand = clock < sandUntil || (clock < gradeSandUntil && speed < t.GradeStartSandBelow)
                     || (input.Uphill >= t.SandUphillFrom && speed < t.SandUphillBelow && throttle >= t.SandUphillThrottle)
-                    || (speed < t.SandUphillBelow && input.GripShare > t.GripEaseFrom);
+                    || gripSanding;
                 if (!Resting)
                     holdHard = false;
                 // A train that won't move under power: rest the motors rather than burn them.
@@ -877,6 +1050,7 @@ namespace AIEngineer.Core.Driving
             }
 
             braking = true;
+            gripSanding = false;
             throttle = 0;
             integral = 0;
             var brake = Clamp(t.BrakeBase + t.BrakeGain * (-shortfall - brakeOff), 0, 1);
@@ -915,10 +1089,33 @@ namespace AIEngineer.Core.Driving
             }
             if (caps.HasDynamicBrake)
                 output.DynamicBrake = Clamp(brake * 1.5, 0, 1);
-            if (caps.HasTrainBrake)
+            if (caps.HasTrainBrake && !caps.PreferIndependent)
                 output.TrainBrake = caps.HasDynamicBrake ? Clamp((brake - 0.3) * 1.4, 0, 1) : brake;
             else
+            {
                 output.LocoBrake = brake;
+                // Safety fallback: if the independent brake stays maxed out without matching the
+                // braking curve approaching a stop, engage the train brake early enough to stop on mark.
+                if (caps.PreferIndependent && caps.HasTrainBrake && brake >= 0.99)
+                {
+                    independentSaturatedFor += input.Dt;
+                    var neededDecel = !double.IsPositiveInfinity(input.ToStop) && speed > 0
+                        ? speed * speed / (2 * Math.Max(2.0, input.ToStop - t.FinalStopDistance))
+                        : 0;
+                    var curveShort = -shortfall > 1.0 && -acceleration < Math.Max(finalDecel * 0.85, neededDecel);
+                    var stopShort = !double.IsPositiveInfinity(input.ToStop) && input.ToStop < 150 && -acceleration < neededDecel;
+                    if (independentSaturatedFor >= 1.5 && speed > 1.2 && (curveShort || stopShort))
+                    {
+                        airSet = Math.Max(airSet, -shortfall > 2.0 ? 1 : t.AirFirstSet);
+                        airSetAt = clock;
+                        output.TrainBrake = airSet;
+                    }
+                }
+                else
+                {
+                    independentSaturatedFor = 0;
+                }
+            }
             return output;
         }
 
@@ -948,7 +1145,7 @@ namespace AIEngineer.Core.Driving
             if (gradeStart == GradeStart.None)
                 gradeStart = GradeStart.Against;
             // Against locked wheels the current climbs fast: taken up as far as the generator allows.
-            if (input.AmpsShare > t.AmpsMost)
+            if (input.AmpsShare > t.AmpsMost || input.Slipping)
                 throttle = Math.Max(0, throttle - t.SlipCut * input.Dt);
             else if (input.AmpsShare <= t.AmpsEaseFrom && input.GripShare <= t.GripTakeUp)
                 throttle = Math.Min(want, throttle + t.ThrottleRate * input.Dt);
@@ -970,6 +1167,7 @@ namespace AIEngineer.Core.Driving
             throttle = 0;
             integral = 0;
             braking = true;
+            gripSanding = false;
             return Held(caps, speed: speed, grade: grade);
         }
 

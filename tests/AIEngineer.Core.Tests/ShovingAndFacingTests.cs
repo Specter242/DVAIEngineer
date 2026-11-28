@@ -224,6 +224,29 @@ public class ShovingAndFacingTests
         Assert.Contains("turning it first would add about", engineer.LogNote);
     }
 
+    [Theory]
+    [InlineData(180)]
+    [InlineData(1500)]
+    public void WithCarsOnTheCarsMeetTheCut(double leg)
+    {
+        var world = new FakeWorld(Wye(leg: leg, main: 900));
+        var train = new NetworkTrain(world, new TrackPosition(2, 100), TrackDirection.Backward, 30) { CarCount = 2 };
+        var engineer = new Engineer();
+        engineer.GoTo(new Waypoint(new TrackPosition(0, 300), WaypointAction.Couple) { Arrival = Arrival.BackFirst, Label = "the cut" });
+        Drive.Run(engineer, train, world, maxSeconds: 5, until: () => engineer.Route != null,
+            state: s =>
+            {
+                s.PowerCars = 1;
+                s.LocoEnd = ConsistEnd.B;
+                s.LocoFront = ConsistEnd.A;
+                return s;
+            });
+        Assert.NotNull(engineer.Route);
+        Assert.Equal(ConsistEnd.A, engineer.Route!.Legs[^1].Leader);
+        Assert.Equal(0, engineer.Route.Reversals);
+        Assert.Null(engineer.LogNote);
+    }
+
     [Fact]
     public void TheFacingIsLoggedOnceAnOrderHoweverItsNumbersChange()
     {

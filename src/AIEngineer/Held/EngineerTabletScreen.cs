@@ -129,15 +129,8 @@ namespace AIEngineer.Held
         {
             var go = new GameObject("[engineer tablet display]");
             go.transform.SetParent(transform, false);
-            go.transform.localPosition = new Vector3(0f, 0f, SurfaceZ);
-            var w = Width * PixelSize * 0.5f;
-            var h = Height * PixelSize * 0.5f;
-            mesh = new Mesh { name = "AIEngineer_TabletScreen" };
-            mesh.vertices = new[] { new Vector3(-w, -h, 0), new Vector3(-w, h, 0), new Vector3(w, h, 0), new Vector3(w, -h, 0) };
-            mesh.uv = new[] { Vector2.zero, Vector2.up, Vector2.one, Vector2.right };
-            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
-            mesh.RecalculateBounds();
-            mesh.UploadMeshData(true);
+            go.transform.localPosition = SurfacePosition;
+            mesh = SurfaceMesh();
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             material = new Material(Shader.Find("Unlit/Texture")) { name = "AIEngineer_TabletDisplay" };
             display = go.AddComponent<MeshRenderer>();
@@ -148,6 +141,94 @@ namespace AIEngineer.Held
         }
 
         /// <summary>The screen's buttons: a pool of slots the pages' plates take in order, and the map's own behind them.</summary>
+        /// <summary>The display's place on the shell: its quad's middle, in the tablet's frame.</summary>
+        internal static Vector3 SurfacePosition => new Vector3(0f, 0f, SurfaceZ);
+
+        /// <summary>The display's quad, facing out of the tablet's front (-z), at the screen's size.</summary>
+        internal static Mesh SurfaceMesh()
+        {
+            var w = Width * PixelSize * 0.5f;
+            var h = Height * PixelSize * 0.5f;
+            var quad = new Mesh { name = "AIEngineer_TabletScreen" };
+            quad.vertices = new[] { new Vector3(-w, -h, 0), new Vector3(-w, h, 0), new Vector3(w, h, 0), new Vector3(w, -h, 0) };
+            quad.uv = new[] { Vector2.zero, Vector2.up, Vector2.one, Vector2.right };
+            quad.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            quad.RecalculateBounds();
+            quad.UploadMeshData(true);
+            return quad;
+        }
+
+        /// <summary>
+        /// The Engineers page with example engineers (<see cref="TabletUi.DrawSample"/>),
+        /// drawn once through the screens' own camera and canvas, for the
+        /// tablet's inventory icon (<see cref="EngineerTabletBody.RenderIcon"/>);
+        /// mipmapped, not readable. Null if it could not be drawn (logged).
+        /// </summary>
+        internal static Texture2D SamplePage()
+        {
+            GameObject screen = null;
+            RenderTexture target = null;
+            var acquired = false;
+            var previous = RenderTexture.active;
+            try
+            {
+                var host = ScreenRenderer.Acquire();
+                acquired = true;
+                screen = new GameObject("[engineer tablet icon screen]", typeof(RectTransform), typeof(Canvas));
+                var canvas = screen.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.WorldSpace;
+                screen.transform.SetParent(host, false);
+                screen.transform.localPosition = Vector3.forward;
+                screen.transform.localScale = Vector3.one * PixelSize;
+                screen.layer = ScreenRenderer.Layer;
+                canvas.worldCamera = ScreenRenderer.Camera;
+                var scaler = screen.AddComponent<CanvasScaler>();
+                scaler.dynamicPixelsPerUnit = 2f;
+                scaler.referencePixelsPerUnit = 100f;
+                var root = screen.GetComponent<RectTransform>();
+                root.sizeDelta = new Vector2(Width, Height);
+                new TabletSurface(root, new NoButtons()).Run(TabletUi.DrawSample);
+                target = RenderTexture.GetTemporary(Width, Height, 0, RenderTextureFormat.ARGB32);
+                var camera = ScreenRenderer.Camera;
+                camera.targetTexture = target;
+                Canvas.ForceUpdateCanvases();
+                camera.Render();
+                camera.targetTexture = null;
+                var page = new Texture2D(Width, Height, TextureFormat.RGBA32, true)
+                {
+                    name = "AIEngineer_TabletIconPage", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Trilinear,
+                };
+                RenderTexture.active = target;
+                page.ReadPixels(new Rect(0, 0, target.width, target.height), 0, 0, true);
+                page.Apply(true, true);
+                return page;
+            }
+            catch (Exception e)
+            {
+                Main.Warn("The engineer's tablet's icon could not draw its screen: " + e.Message);
+                return null;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (target != null)
+                    RenderTexture.ReleaseTemporary(target);
+                if (screen != null)
+                    Object.DestroyImmediate(screen);
+                if (acquired)
+                    ScreenRenderer.Release();
+            }
+        }
+
+        // The icon's page has plates but no buttons.
+        private sealed class NoButtons : ITabletButtons
+        {
+            public int Count => SlotCount;
+            public void Place(int index, Rect canvas, bool active) { }
+            public void HideFrom(int index) { }
+            public Rect RectOf(int index) => default;
+        }
+
         private void BuildButtons()
         {
             slots = new GameObject[SlotCount];

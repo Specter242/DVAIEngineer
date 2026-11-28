@@ -1,5 +1,34 @@
 # AI Engineer: changelog
 
+## 0.17.0 (2026-11-28)
+
+- New: yard sorting. On the map, a yard with two or more freight tracks (an
+  Interchange Yard, or a station's freight yard) has **Sort** for it. It
+  shows the plan track by track, by destination or by job; then Sort now or
+  Add to the queue. The engineer pulls, sets out, and couples cars until
+  each group stands coupled on its own track.
+- Fixed: Add to the queue with jobs canceled the job being worked. The new
+  jobs now wait until it's done, and the tablet shows them as "then ...".
+- Fixed: with cars on, coupling to more cars could run far out to turn
+  round, then couple loco first between the two cuts. It now couples with
+  its cars first.
+- Much less wheel slip: the engineer sands before the wheels slip, holds
+  the throttle short of a notch that would slip, and backs off sooner when
+  they do, so the wheels wear far less.
+- Fixed: with Realistic Brakes, an S060 or S282 could fail to start from a
+  stand. The engineer now works the S-6 independent brake's positions and
+  puts the H-6 back in Running to release.
+- Fixed: on steam, the engineer could leave the cutoff hooked up as the
+  train drifted with the regulator shut, which damages the cylinders with
+  Realistic Firing. It now notches up as speed rises and drops back to full
+  gear when it shuts off.
+- Fixed: with Realistic Brakes, a loco with only a car or two could run
+  past its stop on its own brake. It now plans a gentler stop and brings in
+  the train brake if it falls short.
+- The two engineer plates at the top right of the tablet show the engineers
+  you used most recently, the latest first.
+- The tablet's inventory icon now matches the game's own icons.
+
 ## 0.16.2 (2026-11-23)
 
 - Fixed: with Realistic Brakes, while you rode in a diesel's cab, the

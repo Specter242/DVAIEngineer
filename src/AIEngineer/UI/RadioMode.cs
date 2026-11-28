@@ -197,6 +197,7 @@ namespace AIEngineer.UI
                     session.Engineer.GoTo(waypoint);
                 else
                     session.Engineer.Enqueue(waypoint);
+                Tablet.TabletUi.Touch(session.Loco);
                 Main.Notify($"AI engineer: {session.Name}: {ActionLabel(waypoint)} at {waypoint.Label} ({session.Engineer.Queue.Count} in queue).");
             }
             catch (Exception e)

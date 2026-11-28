@@ -43,10 +43,10 @@ namespace AIEngineer.Core.Driving
         private const double SecondChoiceCost = 1e6;
 
         /// <summary>
-        /// How much more a light loco's route may cost, by the router's
-        /// reckoning (its running and 400 m a reversal), to couple facing as
-        /// asked (away from the cars, by default) before it couples the other
-        /// way round, m. Turning a loco means a wye or a loop, often kilometers
+        /// How much more a coupling's route may cost, by the router's
+        /// reckoning (its running and 400 m a reversal), to couple as asked
+        /// (a light loco facing away from the cars, by default; with cars on,
+        /// cars first) before it couples the other way round, m. Turning a loco means a wye or a loop, often kilometers
         /// off, and every loco drives either way (a player, 17 Nov 2026:
         /// "trying to couple with the back of the train only even when it's
         /// faster ... to couple with the front").
@@ -62,8 +62,8 @@ namespace AIEngineer.Core.Driving
         {
             var plan = new RoutePlan();
             var owner = train.Owner;
-            // A light loco's facing for a coupling is a preference, not worth a long way round to turn it.
-            var softFacing = lastLeader.HasValue && !wp.ArrivalRequired && train.LightEngine && Engineer.IsFacing(wp);
+            // A coupling's facing (or, with cars on, cars first) is a preference, not worth a long way round to turn the train.
+            var softFacing = lastLeader.HasValue && !wp.ArrivalRequired && Engineer.IsFacing(wp);
             var bestCost = double.PositiveInfinity;
             for (var g = 0; g < wp.Goals.Count; g++)
             {

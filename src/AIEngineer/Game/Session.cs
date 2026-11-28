@@ -38,7 +38,6 @@ namespace AIEngineer.Game
         private bool easedNoted;
         private bool prepared;
         private bool keeping;
-        private bool previousPreventDelete;
 
         public Session(TrainCar loco, World world, EngineerSettings settings)
         {
@@ -135,7 +134,8 @@ namespace AIEngineer.Game
         /// machine. It is then looked in on once a second, and the cars
         /// aren't scanned on its account.
         /// </summary>
-        public bool Idle => standing && Engineer.Mode == EngineerMode.Waypoints && Engineer.Queue.Count == 0 && (Jobs == null || Jobs.WaitingOnPlayer);
+        public bool Idle => standing && Engineer.Mode == EngineerMode.Waypoints && Engineer.Queue.Count == 0
+            && (Jobs == null || Jobs.WaitingOnPlayer) && Sort == null;
 
         /// <summary>The player at this loco's controls: aboard its train, or holding a remote paired to it.</summary>
         private bool PlayerAtControls()
@@ -160,17 +160,22 @@ namespace AIEngineer.Game
                 Jobs.Cancel(this, "you stopped it");
                 Jobs = null;
             }
+            if (Sort != null)
+            {
+                Sort.Cancel(this, "you stopped it");
+                Sort = null;
+            }
             Engineer.ClearQueue();
             if (Engineer.Mode != EngineerMode.Off)
                 Engineer.SetWaypoints();
         }
 
-        /// <summary>Removes one order; if a job run put it there, the run ends with it (it can't carry on round a hole in its plan).</summary>
+        /// <summary>Removes one order; if a job or sort run put it there, the run ends with it (it can't carry on round a hole in its plan).</summary>
         public void RemoveOrder(int index)
         {
             if (index < 0 || index >= Engineer.Queue.Count)
                 return;
-            if (Jobs != null && Jobs.Owns(Engineer.Queue[index]))
+            if ((Jobs != null && Jobs.Owns(Engineer.Queue[index])) || (Sort != null && Sort.Owns(Engineer.Queue[index])))
             {
                 StopHere();
                 return;
@@ -313,6 +318,62 @@ namespace AIEngineer.Game
                 var jobs = Jobs;
                 Jobs = null;
                 jobs?.Cancel(this, "the engineer was stopped");
+                var sort = Sort;
+                Sort = null;
+                sort?.Cancel(this, "the engineer was stopped");
+            }
+        }
+
+        /// <summary>
+        /// Ref-counted <see cref="TrainCar.preventDelete"/> protection shared across all sessions
+        /// and yard sorts so overlapping holders never release protection early or leak it stuck on.
+        /// </summary>
+        internal static class CarProtection
+        {
+            private static readonly Dictionary<TrainCar, int> holds = new Dictionary<TrainCar, int>();
+            private static readonly Dictionary<TrainCar, bool> original = new Dictionary<TrainCar, bool>();
+
+            public static void Acquire(TrainCar car)
+            {
+                if (car == null)
+                    return;
+                if (!holds.TryGetValue(car, out var count) || count <= 0)
+                {
+                    original[car] = car.preventDelete;
+                    holds[car] = 1;
+                    car.preventDelete = true;
+                }
+                else
+                {
+                    holds[car] = count + 1;
+                    car.preventDelete = true;
+                }
+            }
+
+            public static void Release(TrainCar car)
+            {
+                if (car == null || !holds.TryGetValue(car, out var count))
+                    return;
+                count--;
+                if (count <= 0)
+                {
+                    holds.Remove(car);
+                    if (original.TryGetValue(car, out var was))
+                    {
+                        original.Remove(car);
+                        car.preventDelete = was;
+                    }
+                }
+                else
+                {
+                    holds[car] = count;
+                }
+            }
+
+            public static void ResetForUnload()
+            {
+                holds.Clear();
+                original.Clear();
             }
         }
 
@@ -327,12 +388,11 @@ namespace AIEngineer.Game
             keeping = keep;
             if (keep)
             {
-                previousPreventDelete = Loco.preventDelete;
-                Loco.preventDelete = true;
+                CarProtection.Acquire(Loco);
             }
             else
             {
-                Loco.preventDelete = previousPreventDelete;
+                CarProtection.Release(Loco);
                 ReleaseKept();
             }
         }
@@ -350,7 +410,7 @@ namespace AIEngineer.Game
 #endif
 
         private Waypoint keptFor;
-        private readonly List<(TrainCar Car, bool Was)> kept = new List<(TrainCar, bool)>();
+        private readonly HashSet<TrainCar> kept = new HashSet<TrainCar>();
         private float nextKeep;
         private float nextResume;
         private string bringingBack;
@@ -433,11 +493,9 @@ namespace AIEngineer.Game
                             continue;
                         foreach (var c in set)
                         {
-                            // Already kept (by this order, or by something else: left as it is).
-                            if (c == null || c.preventDelete)
+                            if (c == null || !kept.Add(c))
                                 continue;
-                            kept.Add((c, false));
-                            c.preventDelete = true;
+                            CarProtection.Acquire(c);
                         }
                     }
                 }
@@ -451,11 +509,8 @@ namespace AIEngineer.Game
         /// <summary>The cars kept for an order go back to as they were.</summary>
         private void ReleaseKept()
         {
-            foreach (var (car, was) in kept)
-            {
-                if (car != null && car != Loco)
-                    car.preventDelete = was;
-            }
+            foreach (var car in kept)
+                CarProtection.Release(car);
             kept.Clear();
             bringingBack = null;
         }
@@ -557,7 +612,9 @@ namespace AIEngineer.Game
             // a run that ends or is canceled can't leave the engineer held.
             Engineer.Holding = WatchTheFuse(state)
                 ? TractionMotors.FuseStatus
-                : Jobs != null && Jobs.Planning ? "Planning the jobs' next moves" : KeepTheOrdersCars(now) ?? Steam?.Waiting(standing);
+                : Jobs != null && Jobs.Planning ? "Planning the jobs' next moves"
+                : Sort != null && Sort.HoldingReason != null ? Sort.HoldingReason
+                : KeepTheOrdersCars(now) ?? Steam?.Waiting(standing);
             if (Steam != null && !steamNoted)
             {
                 steamNoted = true;
@@ -645,13 +702,25 @@ namespace AIEngineer.Game
                 if (ms > SlowTickMs)
                     Main.Warn($"{Name}: working jobs took {ms:F1} ms this tick ({Jobs?.Status})");
             }
+            if (Sort != null)
+            {
+                started = System.Diagnostics.Stopwatch.GetTimestamp();
+                Sort.Tick(this);
+                ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                SlowestJobsTickMs = Math.Max(SlowestJobsTickMs, ms);
+                if (ms > SlowTickMs)
+                    Main.Warn($"{Name}: sorting yard took {ms:F1} ms this tick ({Sort?.Status})");
+            }
         }
 
-        /// <summary>The slowest tick of a job run since the game started, ms.</summary>
+        /// <summary>The slowest tick of a job or sort run since the game started, ms.</summary>
         public static double SlowestJobsTickMs { get; private set; }
 
         /// <summary>The jobs this loco was handed, while it works them; null otherwise.</summary>
         public JobRun Jobs { get; set; }
+
+        /// <summary>The yard this loco is sorting, while it sorts it; null otherwise.</summary>
+        public SortRun Sort { get; set; }
 
         private string lastStatus;
         private float waitingSince;
@@ -737,6 +806,11 @@ namespace AIEngineer.Game
             {
                 Jobs.Cancel(this, "it couldn't move the train");
                 Jobs = null;
+            }
+            if (Sort != null)
+            {
+                Sort.Cancel(this, "it couldn't move the train");
+                Sort = null;
             }
             var tonnes = 0f;
             var set = Loco.trainset;
@@ -893,6 +967,12 @@ namespace AIEngineer.Game
                 Jobs = null;
                 run.Cancel(this, "the train derailed");
             }
+            var sort = Sort;
+            if (sort != null)
+            {
+                Sort = null;
+                sort.Cancel(this, "the train derailed");
+            }
         }
 
         /// <summary>The consist as the engineer sees it.</summary>
@@ -926,18 +1006,36 @@ namespace AIEngineer.Game
                 {
                     locoMass += m;
                     var slip = car.SimController != null ? car.SimController.wheelslipController : null;
-                    if (slip != null && slip.IsWheelslipping)
-                        state.Slipping = true;
+                    if (slip != null)
+                    {
+                        if (slip.IsWheelslipping)
+                        {
+                            state.Slipping = true;
+                            if (slip.wheelslip > state.SlipLevel)
+                                state.SlipLevel = slip.wheelslip;
+                        }
+                        if (slip.DrivingForce != null && !slip.IsEngineBraking)
+                        {
+                            var force = Math.Abs(slip.DrivingForce.generatedForce);
+                            var limit = GripLimit(car, slip);
+                            if (limit > 1f)
+                            {
+                                var share = force / limit;
+                                var sandCoef = Math.Max(1f, slip.SandCoef);
+                                if (share > state.GripShare)
+                                    state.GripShare = share;
+                                var unsanded = share * sandCoef;
+                                if (unsanded > state.UnsandedGripShare)
+                                    state.UnsandedGripShare = unsanded;
+                            }
+                        }
+                    }
                 }
             }
             state.LocoMassShare = mass > 0 ? locoMass / mass : 0;
             state.RiseTowardA = length > 1 ? (endA.transform.position.y - endB.transform.position.y) / length : 0;
             state.MotorHeat = Motors?.Temperature ?? 0;
             state.MotorAmpsShare = Motors?.AmpsShare ?? 0;
-            var grip = Loco.SimController != null ? Loco.SimController.wheelslipController : null;
-            state.GripShare = grip != null && grip.DrivingForce != null && grip.TotalForceLimit > 1f
-                ? Math.Abs(grip.DrivingForce.generatedForce) / grip.TotalForceLimit
-                : 0;
             state.Steam = Steam != null;
             var v = endA.train.GetForwardSpeed();
             state.SpeedTowardA = endA.isFrontCoupler ? v : -v;
@@ -961,9 +1059,40 @@ namespace AIEngineer.Game
                 HasTrainBrake = hasTrainBrake,
                 HasDynamicBrake = Controls.HasDynamicBrake,
                 SlowAir = hasTrainBrake && BrakesMod.Active,
+                ManualLapLocoBrake = BrakesMod.IsManualLapIndependent(Loco),
             };
             ReadAir(set, ref state);
             return state;
+        }
+
+        /// <summary>
+        /// The loco's rail-grip force limit, N. While moving or slipping, the
+        /// game's adhesion system updates <see cref="DV.Wheels.WheelslipController.TotalForceLimit"/>
+        /// every frame; at a stand its ECS entity loses <c>IsMovingTag</c>, so
+        /// the stored figure can be zero (fresh spawn) or stale (stopped dry
+        /// or sanded). Then compute the same static limit from the loco's
+        /// friction coefficient, weight per axle, sand, weather wetness, and pitch.
+        /// </summary>
+        private static float GripLimit(TrainCar car, DV.Wheels.WheelslipController slip)
+        {
+            var live = slip.TotalForceLimit;
+            if (live > 1f && (car.GetAbsSpeed() > 0.05f || slip.IsWheelslipping))
+                return live;
+            var coef = car.carLivery?.parentType?.WheelslipFrictionCoef ?? 0f;
+            var weightPerAxle = car.massController != null ? car.massController.WeightPerAxle : 0f;
+            var axles = slip.NumberOfPoweredAxles;
+            if (coef <= 0f || weightPerAxle <= 0f || axles <= 0)
+                return live;
+            var mult = Math.Max(1f, slip.SandCoef);
+            var wet = DV.Globals.G.GameParams.AdhesionInfluencedByWeather ? Weather.WetnessCached() : 0f;
+            if (wet > 0f)
+                mult *= 1f - Mathf.Clamp01(wet / 0.5f) * 0.5f;
+            var pitch = Mathf.Abs(car.transform.eulerAngles.x % 360f);
+            if (pitch > 180f)
+                pitch = Mathf.Abs(pitch - 360f);
+            mult *= 1f - Mathf.Clamp(5f * Mathf.Clamp01(pitch * Mathf.Deg2Rad / 90f), 0f, 0.9999999f);
+            var computed = coef * mult * weightPerAxle * axles;
+            return computed > 1f ? computed : live;
         }
 
         /// <summary>

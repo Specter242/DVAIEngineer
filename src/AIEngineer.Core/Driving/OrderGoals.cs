@@ -105,15 +105,17 @@ namespace AIEngineer.Core.Driving
         /// through track's far end) or 8 m short of the first standing car,
         /// so the next set-out finds its room behind them. An entry whose
         /// clear stretch is too short gives no goal; when neither is long
-        /// enough, the empty list says the track has no room.
+        /// enough, the empty list says the track has no room. With
+        /// <paramref name="entryOnly"/>, by that entry alone.
         /// </summary>
-        public static List<WaypointGoal> SpotOn(TrackGraph graph, int track, double cutLength, IReadOnlyList<OccupiedSpan> standing)
+        public static List<WaypointGoal> SpotOn(TrackGraph graph, int track, double cutLength, IReadOnlyList<OccupiedSpan> standing,
+            TrackEnd? entryOnly = null, double? maxDepth = null)
         {
             var goals = new List<WaypointGoal>();
             var length = graph.Length(track);
             foreach (var entry in new[] { TrackEnd.Start, TrackEnd.End })
             {
-                if (graph.Links(track, entry).Length == 0)
+                if (graph.Links(track, entry).Length == 0 || (entryOnly.HasValue && entry != entryOnly.Value))
                     continue;
                 var far = entry.Other();
                 // The clear stretch in from this entry: to the first standing car, else the far end.
@@ -123,6 +125,10 @@ namespace AIEngineer.Core.Driving
                     var into = entry == TrackEnd.Start ? s.From : length - s.To;
                     room = Math.Min(room, into - SpotGap);
                 }
+                // On an empty long track, cap depth when requested so a short cut isn't shoved
+                // 650+ m to the opposite end switch when far less track is needed.
+                if (standing.Count == 0 && maxDepth.HasValue)
+                    room = Math.Min(room, Math.Max(cutLength + ClearOfEntry, maxDepth.Value));
                 // The cars wholly on the track, their inner end clear of the entry switch.
                 if (room < cutLength + ClearOfEntry)
                     continue;
@@ -202,13 +208,13 @@ namespace AIEngineer.Core.Driving
         }
 
         /// <summary>The longest cut <see cref="SpotOn"/> can set out on the track now, m (0 when none).</summary>
-        public static double SpotRoom(TrackGraph graph, int track, IReadOnlyList<OccupiedSpan> standing)
+        public static double SpotRoom(TrackGraph graph, int track, IReadOnlyList<OccupiedSpan> standing, TrackEnd? entryOnly = null)
         {
             var best = 0.0;
             var length = graph.Length(track);
             foreach (var entry in new[] { TrackEnd.Start, TrackEnd.End })
             {
-                if (graph.Links(track, entry).Length == 0)
+                if (graph.Links(track, entry).Length == 0 || (entryOnly.HasValue && entry != entryOnly.Value))
                     continue;
                 var room = length - (graph.Links(track, entry.Other()).Length == 0 ? BufferMargin : ClearOfEntry);
                 foreach (var s in standing)

@@ -111,6 +111,8 @@ namespace AIEngineer.Game
         // Orders the player queued behind the run's own while it worked: they wait for it.
         private readonly HashSet<Waypoint> later = new HashSet<Waypoint>();
         private readonly Dictionary<string, int> couplingsFailed = new Dictionary<string, int>();
+        // Jobs added to the queue while this run worked: the next run, begun when this one ends.
+        private readonly List<Job> then = new List<Job>();
         // The plan being worked out on another thread, with what it was asked from; null when none is.
         private Asked pending;
         private Phase phase;
@@ -129,6 +131,30 @@ namespace AIEngineer.Game
 
         /// <summary>The jobs' IDs, for the window.</summary>
         public string Ids => string.Join(", ", handed.Select(j => j.ID));
+
+        /// <summary>The IDs of the jobs to work after these, or null when there are none.</summary>
+        public string ThenIds => then.Count > 0 ? string.Join(", ", then.Select(j => j.ID)) : null;
+
+        /// <summary>
+        /// Queues jobs behind this run's: worked as a run of their own once
+        /// this one ends (handing them to a new run in its place would give
+        /// up this one's). Returns how many were added; jobs already in hand
+        /// or queued are left out.
+        /// </summary>
+        public int Then(List<JobView> views)
+        {
+            var n = 0;
+            foreach (var v in views)
+            {
+                if (handed.Contains(v.Job) || then.Contains(v.Job))
+                    continue;
+                then.Add(v.Job);
+                n++;
+            }
+            if (n > 0)
+                Main.Log($"jobs: queued {string.Join(", ", views.Select(v => v.Id))} after {Ids}");
+            return n;
+        }
 
         /// <summary>Whether the run stands waiting for the player to work a warehouse machine: nothing for it to do meanwhile.</summary>
         public bool WaitingOnPlayer => phase == Phase.Waiting && pending == null;
@@ -179,6 +205,16 @@ namespace AIEngineer.Game
             }
             if (usable.Count == 0)
                 return null;
+            if (queue && session.Sort != null)
+            {
+                problems.Add($"can't queue jobs behind sorting {session.Sort.YardName}; use Do it now to stop sorting and work these jobs");
+                return null;
+            }
+            if (session.Sort != null)
+            {
+                session.Sort.Cancel(session, "it was handed jobs");
+                session.Sort = null;
+            }
             var run = new JobRun(world, usable, facing);
             if (queue)
             {
@@ -1243,14 +1279,47 @@ namespace AIEngineer.Game
                 if (mine.Contains(queue[i]))
                     session.Engineer.RemoveAt(i);
             }
-            Main.Notify($"AI engineer: {session.Name} stopped working {Ids}: {why}.");
-            Main.Log($"jobs: {session.Name}: stopped working {Ids}: {why}");
+            var dropped = ThenIds;
+            then.Clear();
+            Main.Notify($"AI engineer: {session.Name} stopped working {Ids}{(dropped != null ? $" (and {dropped} after them)" : "")}: {why}.");
+            Main.Log($"jobs: {session.Name}: stopped working {Ids}{(dropped != null ? $", {dropped} queued after" : "")}: {why}");
         }
 
         private void End(Session session, string why)
         {
             Finish(session, why);
             session.Jobs = null;
+            StartNext(session);
+        }
+
+        /// <summary>The jobs queued behind this run, handed to a run of their own behind any orders still queued.</summary>
+        private void StartNext(Session session)
+        {
+            if (then.Count == 0 || session.Engineer.Mode != EngineerMode.Waypoints)
+                return;
+            var views = new List<JobView>();
+            foreach (var job in then)
+            {
+                if (job.State != DV.ThingTypes.JobState.InProgress)
+                    continue;
+                try
+                {
+                    views.Add(Jobs.Read(world, job));
+                }
+                catch (Exception e)
+                {
+                    Main.Warn($"jobs: couldn't read queued job {job.ID}: {e.GetType().Name}: {e.Message}");
+                }
+            }
+            then.Clear();
+            if (views.Count == 0)
+                return;
+            var ids = string.Join(", ", views.Select(v => v.Id));
+            var next = Start(session, world, views, true, facing, out var problems);
+            if (problems.Count > 0)
+                Main.Notify($"AI engineer: {session.Name}: left out: {string.Join("; ", problems)}.");
+            if (next == null)
+                Main.Notify($"AI engineer: nothing {session.Name} can do for {ids}.");
         }
 
         /// <summary>Says how each job stands at the end: ready to turn in, or what is left, and why it stopped if it had to.</summary>

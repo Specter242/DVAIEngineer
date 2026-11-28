@@ -157,20 +157,27 @@ namespace AIEngineer.Core.Driving
         /// </summary>
         public Func<TrainState, IEnumerable<WaypointGoal>> GoalsFor { get; set; }
 
-        /// <summary>Recomputes the goals for the train now, if the order sizes them.</summary>
-        public void Resize(TrainState train)
+        /// <summary>
+        /// When true, an empty result from <see cref="GoalsFor"/> cancels this planning attempt
+        /// instead of reusing stale goals (used when dynamic occupancy invalidates a ladder-locked set-out).
+        /// </summary>
+        public bool RejectEmptyGoals { get; set; }
+
+        /// <summary>Recomputes the goals for the train now, if the order sizes them. Returns false if rejected.</summary>
+        public bool Resize(TrainState train)
         {
             var source = GoalsFor != null ? GoalsFor(train)
                 : GoalsForLength != null ? GoalsForLength(train.Length)
                 : null;
             if (source == null)
-                return;
+                return true;
             var fresh = new List<WaypointGoal>(source);
             if (fresh.Count == 0)
-                return;
+                return !RejectEmptyGoals;
             goals.Clear();
             goals.AddRange(fresh);
             chosen = 0;
+            return true;
         }
 
         public WaypointAction Action { get; set; }

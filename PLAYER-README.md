@@ -65,7 +65,14 @@ train, and carries on by itself once you've put that right.
     couples to them (and the next cut, if need be) and shoves them further
     in. A shunting job it works step by step: it brings the cars to the
     warehouse machine's track and waits there while you work the machine,
-    then takes them on. Turn the booklets in after.
+    then takes them on. Turn the booklets in after. Jobs added to the
+    queue while it works others wait until those are done.
+  - **Sorting a yard:** on the map, a yard with two or more freight tracks
+    (an Interchange Yard, or a station's freight yard) has **Sort** for it,
+    on its page or on a track or cut in it. It shows the plan track by
+    track, **By destination** or **By job**; then **Sort now** or **Add to
+    the queue**. The engineer pulls, sets out, and couples cars until each
+    group stands coupled on its own track.
   - When an order needs the loco turned round, it runs round a wye or a
     loop. If there's none it can reach, it does the move anyway and tells
     you what it couldn't manage.
@@ -116,8 +123,8 @@ It keeps to the posted speed limits (and a cap on yard tracks), never
 throws a switch with a car on it, never plans a way through standing cars
 or past cars left too near a switch (about 35 m from the points), and backs
 a train through a switchback when that's the way in. It opens the throttle
-about a notch at a time. If its wheels slip it eases off, sands, and feels
-its way back up. It eases the throttle as the traction motors get hot,
+about a notch at a time and sands before its wheels would slip. If they
+slip it eases off, sands, and feels its way back up. It eases the throttle as the traction motors get hot,
 and if their fuse is off it shuts off, holds the train, and tells you: reset
 the fuse in the cab and it carries on.
 

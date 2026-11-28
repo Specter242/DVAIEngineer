@@ -124,9 +124,13 @@ namespace AIEngineer.Game
             }
             // A notched lever settles on a notch: ask for one, or it snaps back
             // and the engineer would set it again every tick (and take the snap
-            // for the player's hand).
-            if (control.IsNotched && control.NotchCount >= 1f)
-                want = Mathf.Round(want * control.NotchCount) / control.NotchCount;
+            // for the player's hand). Lever.notches / NotchCount counts positions
+            // (0..N-1), so the normalized spacing is 1 / (notches - 1).
+            var steps = cabNotches > 1 ? cabNotches - 1f
+                : control.IsNotched && control.NotchCount > 1f ? control.NotchCount - 1f
+                : 0f;
+            if (steps >= 1f)
+                want = Mathf.Round(want * steps) / steps;
             var value = control.Value;
             // Closing a control it had opened, it is closed whatever it reads: a throttle held at
             // idle (Realistic Brakes' traction cut) comes back only once the driver has closed it.
@@ -191,6 +195,7 @@ namespace AIEngineer.Game
         private float heldAtIdleSince = float.NaN;
         private float heldCeiling = 1f;
         private float lastApply = float.NaN;
+        private float lastBailOff = float.NegativeInfinity;
 
         /// <summary>A steam loco: the reverser is its cutoff, notched up as it gathers speed.</summary>
         public bool Steam { get; set; }
@@ -414,6 +419,7 @@ namespace AIEngineer.Game
             heldAtIdleSince = float.NaN;
             heldCeiling = 1f;
             lastApply = float.NaN;
+            lastBailOff = float.NegativeInfinity;
             throttle.Release();
             trainBrake.Release();
             locoBrake.Release();
@@ -440,6 +446,9 @@ namespace AIEngineer.Game
         public void Secure(float now)
         {
             // Each control by itself: one that throws (another mod's loco) mustn't leave the rest as they were.
+            // A moving steam loco dropped into the corner before shutting the regulator won't drift hooked up.
+            if (Steam && loco != null && Math.Abs(loco.GetForwardSpeed()) >= SteamGear.MovingSpeed)
+                Try(() => reverser.Set(loco.GetForwardSpeed() > 0f ? 1f : 0f, now));
             Try(() => throttle.Set(0f, now));
             Try(() => dynamicBrake.Set(0f, now));
             Try(() => locoBrake.Set(1f, now));
@@ -490,19 +499,25 @@ namespace AIEngineer.Game
                 cutoutBefore = cutout.Value;
                 cutout.Set(0f);
             }
-            if (reverserValue.HasValue && Mathf.Abs(reverser.Value - reverserValue.Value) > 0.03f)
+            if (Steam && regulator < (float)SteamGear.ShutThrottle && loco != null && Math.Abs(loco.GetForwardSpeed()) >= SteamGear.MovingSpeed)
+                reverserValue = loco.GetForwardSpeed() > 0f ? 1f : 0f;
+            if (reverserValue.HasValue)
             {
-                // A change of way only shut off.
-                var turning = (reverser.Value > 0.5f) != (reverserValue.Value > 0.5f);
-                if (turning)
+                var tol = reverserValue.Value <= 0.01f || reverserValue.Value >= 0.99f ? 0.01f : 0.03f;
+                if (Mathf.Abs(reverser.Value - reverserValue.Value) > tol)
                 {
-                    throttle.Set(0f, now);
-                    regulator = 0f;
+                    // A change of way only shut off.
+                    var turning = (reverser.Value > 0.5f) != (reverserValue.Value > 0.5f);
+                    if (turning)
+                    {
+                        throttle.Set(0f, now);
+                        regulator = 0f;
+                    }
+                    reverser.Set(reverserValue.Value, now);
                 }
-                reverser.Set(reverserValue.Value, now);
             }
             throttle.Set(regulator, now);
-            locoBrake.Set(brake, now);
+            WorkLocoBrake(brake, 0f, now);
         }
 
         /// <summary>Takes off the loco's own hand brake, by its cab control so the wheel follows.</summary>
@@ -513,33 +528,6 @@ namespace AIEngineer.Game
         /// <param name="speed">Speed, m/s, either way: a steam loco's cutoff is notched up with it.</param>
         public void Apply(ControlOutput output, bool? forward, bool standing, float now, double speed = 0)
         {
-            if (forward.HasValue && Steam)
-            {
-                // Full gear to start; notched up with speed, the way it is going, without shutting off.
-                var v = Math.Abs(speed);
-                var cutoff = v < 3 ? 1f : v < 8 ? 0.75f : v < 14 ? 0.5f : 0.35f;
-                var want = forward.Value ? 0.5f + 0.5f * cutoff : 0.5f - 0.5f * cutoff;
-                var sameWay = (reverser.Value > 0.5f) == forward.Value && Mathf.Abs(reverser.Value - 0.5f) > 0.1f;
-                if (sameWay)
-                {
-                    if (Mathf.Abs(reverser.Value - want) > 0.04f)
-                        reverser.Set(want, now);
-                    forward = null;
-                }
-            }
-            if (forward.HasValue)
-            {
-                var want = forward.Value ? 1f : 0f;
-                if (Mathf.Abs(reverser.Value - want) > 0.01f)
-                {
-                    // The reverser moves only at a stand, and with the throttle shut
-                    // (the game blocks it otherwise); until then, no power.
-                    throttle.Set(0f, now);
-                    output.Throttle = 0;
-                    if (standing)
-                        reverser.Set(want, now);
-                }
-            }
             var power = (float)output.Throttle;
             if (now < ceilingUntil)
                 power = Mathf.Min(power, throttleCeiling);
@@ -570,7 +558,49 @@ namespace AIEngineer.Game
                 power = Mathf.Min(power, heldCeiling);
                 heldCeiling = Mathf.Min(1f, heldCeiling + HeldReopenRate * since);
             }
-            throttle.Set(power, now);
+
+            if (Steam)
+            {
+                var locoSpeed = loco != null ? loco.GetForwardSpeed() : (float)speed;
+                var moving = Math.Abs(locoSpeed) >= SteamGear.MovingSpeed;
+                var opposing = moving && forward.HasValue && (locoSpeed > 0f) != forward.Value;
+                var sameWay = !forward.HasValue || ((reverser.Value > 0.5f) == forward.Value && Mathf.Abs(reverser.Value - 0.5f) > 0.1f);
+                if (opposing || !sameWay)
+                    power = 0f;
+                var wantRev = SteamGear.Reverser(locoSpeed, power, forward, reverser.Value);
+                // Dropping to the corner before shutting the regulator (and cracking the regulator
+                // before hooking up) keeps Realistic Firing from ever seeing a frame hooked up
+                // with the throttle shut.
+                if (power < (float)SteamGear.ShutThrottle)
+                {
+                    if (wantRev.HasValue)
+                        SetSteamReverser((float)wantRev.Value, standing, now);
+                    throttle.Set(power, now);
+                }
+                else
+                {
+                    throttle.Set(power, now);
+                    if (wantRev.HasValue)
+                        SetSteamReverser((float)wantRev.Value, standing, now);
+                }
+            }
+            else
+            {
+                if (forward.HasValue)
+                {
+                    var want = forward.Value ? 1f : 0f;
+                    if (Mathf.Abs(reverser.Value - want) > 0.01f)
+                    {
+                        // The reverser moves only at a stand, and with the throttle shut
+                        // (the game blocks it otherwise); until then, no power.
+                        throttle.Set(0f, now);
+                        power = 0f;
+                        if (standing)
+                            reverser.Set(want, now);
+                    }
+                }
+                throttle.Set(power, now);
+            }
             if (sander != null)
             {
                 var sand = output.Sand ? 1f : 0f;
@@ -578,14 +608,60 @@ namespace AIEngineer.Game
                     sander.Set(sand);
             }
             dynamicBrake.Set((float)output.DynamicBrake, now);
-            locoBrake.Set((float)output.LocoBrake, now);
+            WorkLocoBrake((float)output.LocoBrake, (float)output.TrainBrake, now);
             WorkTrainBrake((float)output.TrainBrake, now);
+        }
+
+        private void WorkLocoBrake(float level, float trainBrakeLevel, float now)
+        {
+            if (!locoBrake.Present)
+                return;
+            if (!BrakesMod.IsManualLapIndependent(loco))
+            {
+                locoBrake.Set(level, now);
+                return;
+            }
+            // Realistic Brakes' S-6 independent (American E-T steam: S060, S282) is manual-lap:
+            // 0.25 running, 0.50 lap, 0.75 slow application, 1.00 quick application.
+            var cyl = BrakesMod.CylinderPressure(loco);
+            var handle = (float)ManualLapIndependent.Handle(level, cyl);
+            locoBrake.Set(handle, now);
+            // Releasing on E-T requires the H-6 automatic valve in Running (not Release or Holding)
+            // so the release pipe opens; bail off if cylinder pressure is still held on the engine.
+            if (level <= 0.01f && trainBrakeLevel <= 0.01f)
+            {
+                var cleared = BrakesMod.EnsureRunning(loco);
+                if ((cleared || cyl > 0.15f) && now - lastBailOff >= 1.5f)
+                {
+                    var bailed = BrakesMod.BailOff(loco);
+                    lastBailOff = now;
+                    if (bailed > 0.05f)
+                        Main.Log($"{loco.ID}: bailed off {bailed:F1} bar of engine brake to release{(cleared ? " (H-6 returned to running)" : "")}");
+                }
+            }
+        }
+
+        private void SetSteamReverser(float want, bool standing, float now)
+        {
+            var tol = want <= 0.01f || want >= 0.99f ? 0.01f : 0.03f;
+            if (Mathf.Abs(reverser.Value - want) <= tol)
+                return;
+            var crossing = (reverser.Value > 0.5f) != (want > 0.5f) || Mathf.Abs(reverser.Value - 0.5f) <= 0.1f;
+            if (crossing)
+            {
+                throttle.Set(0f, now);
+                if (!standing)
+                    return;
+            }
+            reverser.Set(want, now);
         }
 
         private void WorkTrainBrake(float level, float now)
         {
             if (!trainBrake.Present)
                 return;
+            if (level <= 0.01f)
+                BrakesMod.EnsureRunning(loco);
             var brakes = loco.brakeSystem;
             if (brakes == null || brakes.selfLappingController)
             {

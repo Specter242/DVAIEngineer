@@ -334,12 +334,14 @@ namespace AIEngineer.Diagnostics
                 yield return Takeover(session);
                 yield return OffSecures(session);
             }
-            if (Part("jobs"))
+            if (Part("jobs") || Part("jobqueue"))
                 yield return JobsWorked(session);
             if (Part("industry"))
                 yield return Industry(session);
             if (Part("dispatcher"))
                 yield return Dispatcher(session);
+            if (Part("couplecars"))
+                yield return CoupleCarsPart(session);
             if (Part("tablet") || Part("windows"))
                 yield return TabletPart(session);
             if (Part("steam"))
@@ -1585,6 +1587,8 @@ namespace AIEngineer.Diagnostics
         /// and a whole cut of two hoppers loaded with coal (heavy enough to
         /// need the train brake); a car standing on the flatcars' destination
         /// may make the set-out couple to it and shove it in.
+        /// D: a second job added to the queue while the first is worked
+        /// (SelfTest.JobQueue.cs); "jobqueue" runs it alone.
         /// </summary>
         private static IEnumerator JobsWorked(Session s)
         {
@@ -1624,13 +1628,17 @@ namespace AIEngineer.Diagnostics
                 yield break;
             }
             Line($"jobs: at {station.stationInfo.YardID}, free tracks {string.Join(", ", tracks.Select(t => $"{t.Id} ({t.Length:F0} m{(t.DeadEnd ? ", stub" : "")})"))}");
-            if (tracks.Count >= 6)
-                yield return StartingCoupled(s, world, station, tracks[4], tracks[5]);
-            else
-                Line("SKIP jobs A (starting coupled): fewer than six free tracks");
-            yield return MiddleAndHeavy(s, world, station, tracks[0], tracks[1], tracks[2], tracks[3]);
-            if (tracks.Count >= 6)
-                yield return WithCaboose(s, world, station, tracks[4], tracks[5]);
+            if (Part("jobs"))
+            {
+                if (tracks.Count >= 6)
+                    yield return StartingCoupled(s, world, station, tracks[4], tracks[5]);
+                else
+                    Line("SKIP jobs A (starting coupled): fewer than six free tracks");
+                yield return MiddleAndHeavy(s, world, station, tracks[0], tracks[1], tracks[2], tracks[3]);
+                if (tracks.Count >= 6)
+                    yield return WithCaboose(s, world, station, tracks[4], tracks[5]);
+            }
+            yield return QueuedJob(s, world, station, tracks[0], tracks[1], tracks[2], tracks[3]);
         }
 
         /// <summary>
